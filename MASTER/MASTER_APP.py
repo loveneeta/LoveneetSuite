@@ -1,6 +1,14 @@
+import os
+import sys
+
+# Ensure imports resolve relative to this file, not the working directory
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import customtkinter as ctk
 from modules.image_converter import ImageConverterFrame
-from modules.ppt_exporter.ppt_exporter import PPTExporterFrame
+from modules.ppt_exporter import PPTExporterFrame
+from modules.image_organizer_module import ImageOrganizerFrame
+
 # =========================================================
 # APP
 # =========================================================
@@ -54,6 +62,7 @@ class MasterApp(ctk.CTk):
             "Catalog Generator",
             "PPT Exporter",
             "Image Converter",
+            "Image Organizer",       # ← NEW
             "Images To PPT",
             "Template Designer",
             "Settings"
@@ -153,16 +162,30 @@ class MasterApp(ctk.CTk):
                 fill="both",
                 expand=True
             )
+
         elif page_name == "Image Converter":
 
             frame = ImageConverterFrame(
-            self.content
-        )
+                self.content
+            )
 
             frame.pack(
-            fill="both",
-            expand=True
-                      )
+                fill="both",
+                expand=True
+            )
+
+        elif page_name == "Image Organizer":        # ← NEW
+
+            frame = ImageOrganizerFrame(
+                self.content
+            )
+
+            frame.pack(
+                fill="both",
+                expand=True,
+                padx=10,
+                pady=10
+            )
 
         elif page_name == "Images To PPT":
             self.placeholder(page_name)
@@ -185,6 +208,7 @@ class MasterApp(ctk.CTk):
             "Catalog Generator",
             "PPT Exporter",
             "Image Converter",
+            "Image Organizer",       # ← NEW card
             "Images To PPT",
             "Template Designer"
         ]
@@ -220,6 +244,10 @@ class MasterApp(ctk.CTk):
                 rely=0.5,
                 anchor="center"
             )
+
+            # Make card clickable
+            frame.bind("<Button-1>", lambda e, c=card: self.load_page(c))
+            label.bind("<Button-1>", lambda e, c=card: self.load_page(c))
 
             col += 1
 
