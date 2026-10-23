@@ -268,6 +268,9 @@ async def excel_to_ppt(
                 wb.close()
                 raise HTTPException(400, "Logo must be 5 MB or smaller.")
         auto_center_image = bool(style_data.get("auto_center_image", True))
+        image_fit = str(style_data.get("image_fit", "contain"))
+        if image_fit not in {"contain", "cover"}:
+            image_fit = "contain"
         for product_index, product in enumerate(products):
             slot_index = product_index % len(slots)
             if slot_index == 0:
@@ -302,6 +305,20 @@ async def excel_to_ppt(
             if product["picture"] is not None:
                 try:
                     img_bytes = product["picture"]._data()
+                    from PIL import Image, ImageOps
+                    image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+                    box_w = max(1, int(float(slot["img"][2]) - float(slot["img"][0])))
+                    box_h = max(1, int(float(slot["img"][3]) - float(slot["img"][1])))
+                    if image_fit == "cover":
+                        fitted = ImageOps.fit(image, (box_w * 2, box_h * 2), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+                    else:
+                        fitted = Image.new("RGBA", (box_w * 2, box_h * 2), (255,255,255,0))
+                        contained = ImageOps.contain(image, (box_w * 2, box_h * 2), method=Image.Resampling.LANCZOS)
+                        fitted.alpha_composite(contained, ((fitted.width-contained.width)//2, (fitted.height-contained.height)//2))
+                    image_buffer = io.BytesIO()
+                    fitted.save(image_buffer, format="PNG")
+                    image_buffer.seek(0)
+                    img_bytes = image_buffer.getvalue()
                     x1, y1, x2, y2 = [float(v) for v in slot["img"]]
                     tx1, _, tx2, _ = [float(v) for v in slot["text"]]
                     if auto_center_image:
