@@ -1,4 +1,4 @@
-import io, os, re, shutil, subprocess, tempfile, zipfile
+import io, json, os, re, shutil, subprocess, tempfile, zipfile
 from pathlib import Path
 from typing import Annotated
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -121,3 +121,179 @@ async def ppt_export(files: Annotated[list[UploadFile], File()], export_jpg: Ann
                     if export_webp: image.save(folder/(label+".webp"),"WEBP",quality=quality)
             pdf.unlink(missing_ok=True)
         return zip_folder(out,"powerpoint_exports.zip")
+
+
+@app.post("/api/excel-to-ppt")
+async def excel_to_ppt(
+    excel: Annotated[UploadFile, File()],
+    mapping: Annotated[str, Form()],
+    layout: Annotated[str, Form()],
+    style: Annotated[str, Form()],
+):
+    """Build a product catalogue presentation from an XLSX workbook and its embedded cell images."""
+    from openpyxl import load_workbook
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.enum.text import PP_ALIGN
+    from pptx.dml.color import RGBColor
+
+    if Path(excel.filename or "").suffix.lower() != ".xlsx":
+        raise HTTPException(400, "Upload an .xlsx workbook.")
+    try:
+        mapping_data = json.loads(mapping)
+        slots = json.loads(layout)
+        style_data = json.loads(style)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid mapping, layout, or style settings.")
+    if not isinstance(slots, list) or not 1 <= len(slots) <= 6:
+        raise HTTPException(400, "Choose between 1 and 6 product slots per slide.")
+    try:
+        for slot in slots:
+            for rect_name in ("img", "text"):
+                rect = slot[rect_name]
+                if len(rect) != 4:
+                    raise ValueError()
+                x1, y1, x2, y2 = [float(v) for v in rect]
+                if not (0 <= x1 < x2 <= 800 and 0 <= y1 < y2 <= 450):
+                    raise ValueError()
+        font_size = max(8, min(48, int(style_data.get("font_size", 18))))
+        font_name = str(style_data.get("font_name", "Arial"))[:80]
+        font_color = str(style_data.get("font_color", "000000")).replace("#", "").upper()
+        background_color = str(style_data.get("background_color", "FFFFFF")).replace("#", "").upper()
+        if not re.fullmatch(r"[0-9A-F]{6}", font_color) or not re.fullmatch(r"[0-9A-F]{6}", background_color):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "Invalid layout coordinates or style settings. Coordinates must fit within 800 × 450.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        workbook_path = root / safe_name(excel.filename or "products.xlsx")
+        workbook_path.write_bytes(await excel.read())
+        try:
+            wb = load_workbook(workbook_path, data_only=True)
+        except Exception as exc:
+            raise HTTPException(400, "Cannot read Excel workbook: " + str(exc))
+        if not wb.worksheets:
+            raise HTTPException(400, "Workbook contains no worksheets.")
+        ws = wb.active
+        headers = {}
+        for cell in ws[1]:
+            if cell.value is not None:
+                headers[str(cell.value).strip().casefold()] = cell.column
+
+        def mapped_col(role, *fallbacks):
+            selected = str(mapping_data.get(role) or "").strip().casefold()
+            if selected and selected in headers:
+                return headers[selected]
+            for fallback in fallbacks:
+                if fallback in headers:
+                    return headers[fallback]
+            return None
+
+        code_col = mapped_col("code", "sku", "item code", "product code", "code")
+        desc_col = mapped_col("description", "description", "product name", "product", "desc")
+        price_col = mapped_col("price", "price", "mrp", "rate")
+        length_col = mapped_col("length", "length", "l")
+        width_col = mapped_col("width", "width", "breadth", "w")
+        height_col = mapped_col("height", "height", "h")
+        image_col = mapped_col("image", "image", "photo", "picture", "img")
+        if not code_col:
+            wb.close()
+            raise HTTPException(400, "Map a product code / SKU column.")
+        
+        # openpyxl keeps worksheet pictures anchored to zero-based row/column coordinates.
+        image_by_cell = {}
+        try:
+            for picture in getattr(ws, "_images", []):
+                anchor = getattr(picture, "anchor", None)
+                marker = getattr(anchor, "_from", None)
+                if marker is None:
+                    continue
+                row_number, column_number = marker.row + 1, marker.col + 1
+                if image_col is None or column_number == image_col:
+                    image_by_cell.setdefault(row_number, picture)
+        except Exception:
+            image_by_cell = {}
+
+        def cell_value(row_number, column_number):
+            if not column_number:
+                return ""
+            value = ws.cell(row=row_number, column=column_number).value
+            return "" if value is None else str(value).strip()
+
+        products = []
+        for row_number in range(2, ws.max_row + 1):
+            code = cell_value(row_number, code_col)
+            if not code:
+                continue
+            products.append({
+                "row": row_number,
+                "code": code,
+                "description": cell_value(row_number, desc_col),
+                "price": cell_value(row_number, price_col),
+                "length": cell_value(row_number, length_col),
+                "width": cell_value(row_number, width_col),
+                "height": cell_value(row_number, height_col),
+                "picture": image_by_cell.get(row_number),
+            })
+        if not products:
+            wb.close()
+            raise HTTPException(400, "No product rows found. Check the product code column mapping.")
+        if len(products) > 5000:
+            wb.close()
+            raise HTTPException(400, "This workbook has more than 5,000 products. Split it into smaller workbooks.")
+
+        prs = Presentation()
+        prs.slide_width = Inches(8)
+        prs.slide_height = Inches(4.5)
+        blank_layout = prs.slide_layouts[6]
+        for product_index, product in enumerate(products):
+            slot_index = product_index % len(slots)
+            if slot_index == 0:
+                slide = prs.slides.add_slide(blank_layout)
+                fill = slide.background.fill
+                fill.solid()
+                fill.fore_color.rgb = RGBColor.from_string(background_color)
+            slot = slots[slot_index]
+            if product["picture"] is not None:
+                try:
+                    img_bytes = product["picture"]._data()
+                    x1, y1, x2, y2 = [float(v) / 100 for v in slot["img"]]
+                    slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(x1), Inches(y1), width=Inches(x2-x1), height=Inches(y2-y1))
+                except Exception:
+                    pass
+
+            tx1, ty1, tx2, ty2 = [float(v) / 100 for v in slot["text"]]
+            textbox = slide.shapes.add_textbox(Inches(tx1), Inches(ty1), Inches(tx2-tx1), Inches(ty2-ty1))
+            text_frame = textbox.text_frame
+            text_frame.clear()
+            text_frame.word_wrap = True
+            line1 = product["code"] + (" | " + product["description"] if product["description"] else "")
+            dimensions = ""
+            if product["length"] and product["width"] and product["height"]:
+                dimensions = f'{product["length"]} x {product["width"]} x {product["height"]}'
+                try:
+                    dims_in = [round(float(v) / 2.54, 1) for v in (product["length"], product["width"], product["height"])]
+                    dimensions += " CM | " + " x ".join(str(v) for v in dims_in) + " IN"
+                except (TypeError, ValueError):
+                    dimensions += " CM"
+            lines = [line1]
+            if dimensions:
+                lines.append(dimensions)
+            if product["price"]:
+                lines.append(product["price"])
+            for line_index, line in enumerate(lines):
+                paragraph = text_frame.paragraphs[0] if line_index == 0 else text_frame.add_paragraph()
+                paragraph.alignment = PP_ALIGN.CENTER
+                run = paragraph.add_run()
+                run.text = line
+                run.font.name = font_name
+                run.font.size = Pt(font_size if line_index == 0 else (font_size - 2 if line_index == 1 else font_size - 1))
+                run.font.bold = line_index in (0, len(lines)-1) and (line_index == 0 or len(lines) > 1)
+                run.font.color.rgb = RGBColor.from_string(font_color)
+
+        wb.close()
+        output = root / "product_catalogue.pptx"
+        prs.save(output)
+        from fastapi.responses import FileResponse
+        return FileResponse(output, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", filename="product_catalogue.pptx")
