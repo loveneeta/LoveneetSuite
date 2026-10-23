@@ -1,6 +1,15 @@
 # Loveneet Suite — Web Edition
 
-Loveneet Suite includes Image Converter, Image Organizer, PowerPoint Exporter, and the integrated **PO PDF to Excel** module.
+Loveneet Suite includes Image Converter, Image Organizer, PowerPoint Exporter, **Excel to Catalogue PPT**, and the integrated **PO PDF to Excel** module.
+
+
+## Excel to Catalogue PPT
+- Upload an XLSX product workbook and map SKU, description, price, dimensions, and embedded image columns.
+- Generate a PowerPoint product catalogue with 2 or 3 products per slide.
+- Adjust image/text slot coordinates on an 800 × 450 design canvas and set font/background styling.
+- Embedded worksheet images are placed into the matching product slot. Rows without a mapped product code are skipped.
+- PowerPoint generation runs through the FastAPI backend and returns a downloadable PPTX.
+- The module expects product photos to be embedded in the worksheet; linked image URLs are not fetched.
 
 ## PO PDF to Excel
 - Upload multiple purchase-order or quotation PDFs.
