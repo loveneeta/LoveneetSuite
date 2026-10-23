@@ -83,6 +83,20 @@ export default function ExcelToPptTool() {
     </section>
     <section className="ep-panel"><div className="ep-title"><div><b>03</b><div><h3>Slide layout and styling</h3><p>Coordinates use an 800 × 450 design canvas. Set image and text rectangles for each product slot.</p></div></div></div>
       <div className="ep-layout-options"><button type="button" className={count === 2 ? "selected" : ""} onClick={() => changeCount(2)}>2 products per slide</button><button type="button" className={count === 3 ? "selected" : ""} onClick={() => changeCount(3)}>3 products per slide</button><button type="button" className="ep-reset" onClick={resetLayout}><RotateCcw size={14}/> Reset layout</button></div>
+      <div className="ep-visual-guide">
+        <div className="ep-visual-heading"><div><h4>Visual slide preview</h4><p>See where your products will appear. Blue = image area; amber = product details.</p></div><span>16:9 SLIDE</span></div>
+        <div className="ep-visual-canvas" style={{ backgroundColor: `#${background.replace("#", "")}` }}>
+          {layout.map((slot, i) => <React.Fragment key={i}>
+            <div className="ep-visual-rect ep-visual-image" style={{ left: `${slot.img[0] / 8}%`, top: `${slot.img[1] / 4.5}%`, width: `${(slot.img[2] - slot.img[0]) / 8}%`, height: `${(slot.img[3] - slot.img[1]) / 4.5}%` }}>
+              <ImageIcon size={18}/><strong>Product {i + 1} image</strong><small>{slot.img[2]-slot.img[0]} × {slot.img[3]-slot.img[1]}</small>
+            </div>
+            <div className="ep-visual-rect ep-visual-text" style={{ left: `${slot.text[0] / 8}%`, top: `${slot.text[1] / 4.5}%`, width: `${(slot.text[2] - slot.text[0]) / 8}%`, height: `${(slot.text[3] - slot.text[1]) / 4.5}%`, color: `#${fontColor.replace("#", "")}` }}>
+              <strong>Product {i + 1} details</strong><span>SKU / Name</span><span>Dimensions</span><span>Price</span>
+            </div>
+          </React.Fragment>)}
+        </div>
+        <div className="ep-visual-legend"><span><i className="ep-legend-blue"/> Image placement</span><span><i className="ep-legend-amber"/> Text placement</span><span>Adjust the values below to move or resize each area.</span></div>
+      </div>
       <div className="ep-slots">{layout.map((slot, i) => <div className="ep-slot" key={i}><h4>Product slot {i + 1}</h4><div className="ep-coord-head"><span>Image rectangle (x1, y1, x2, y2)</span></div><div className="ep-coords">{slot.img.map((v, j) => <label key={j}><span>{["X1", "Y1", "X2", "Y2"][j]}</span><input type="number" min="0" max={j % 2 === 0 ? 800 : 450} value={v} onChange={e => changeCoord(i, "img", j, e.target.value)}/></label>)}</div><div className="ep-coord-head"><span>Text rectangle (x1, y1, x2, y2)</span></div><div className="ep-coords">{slot.text.map((v, j) => <label key={j}><span>{["X1", "Y1", "X2", "Y2"][j]}</span><input type="number" min="0" max={j % 2 === 0 ? 800 : 450} value={v} onChange={e => changeCoord(i, "text", j, e.target.value)}/></label>)}</div></div>)}</div>
       <div className="ep-style-grid"><label><span>Font size</span><input type="number" min="8" max="48" value={fontSize} onChange={e => setFontSize(Number(e.target.value))}/></label><label><span>Font family</span><select value={fontName} onChange={e => setFontName(e.target.value)}><option>Arial</option><option>Calibri</option><option>Manrope</option><option>Times New Roman</option></select></label><label><span>Font color</span><input type="color" value={`#${fontColor.replace("#", "")}`} onChange={e => setFontColor(e.target.value)}/></label><label><span>Slide background</span><input type="color" value={`#${background.replace("#", "")}`} onChange={e => setBackground(e.target.value)}/></label></div>
     </section>
