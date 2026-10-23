@@ -33,6 +33,8 @@ export default function ExcelToPptTool() {
   const [ratio, setRatio] = useState<SlideRatio>("16:9");
   const [autoCenter, setAutoCenter] = useState(true);
   const [imageFit, setImageFit] = useState<"contain" | "cover">("contain");
+  const [drag, setDrag] = useState<{slot:number;section:"img"|"text";x:number;y:number;rect:number[]}|null>(null);
+  const beginDrag = (e: React.PointerEvent<HTMLDivElement>, slot:number, section:"img"|"text") => { e.preventDefault(); const rect=layout[slot][section]; setDrag({slot,section,x:e.clientX,y:e.clientY,rect:[...rect]}); (e.currentTarget.parentElement as HTMLElement)?.setPointerCapture?.(e.pointerId); };
   const [headerText, setHeaderText] = useState("PRODUCT COLLECTION");
   const [showHeader, setShowHeader] = useState(true);
   const [showRule, setShowRule] = useState(true);
@@ -96,14 +98,14 @@ export default function ExcelToPptTool() {
       <div className="ep-layout-options"><label className="ep-ratio-picker"><span>Slide shape</span><select value={ratio} onChange={e => setRatio(e.target.value as SlideRatio)}><option>16:9</option><option>4:3</option><option>A4 Landscape</option><option>A4 Portrait</option></select></label><button type="button" className={count === 2 ? "selected" : ""} onClick={() => changeCount(2)}>2 products per slide</button><button type="button" className={count === 3 ? "selected" : ""} onClick={() => changeCount(3)}>3 products per slide</button><button type="button" role="switch" aria-checked={autoCenter} className={`ep-align-button ep-toggle ${autoCenter ? "is-on" : "is-off"}`} onClick={() => setAutoCenter(v => !v)}><span className="ep-toggle-track"><span className="ep-toggle-thumb"/></span><span>Center images to text</span><small>{autoCenter ? "ON" : "OFF"}</small></button><button type="button" className="ep-reset" onClick={resetLayout}><RotateCcw size={14}/> Reset layout</button></div>
       <div className="ep-visual-guide">
         <div className="ep-visual-heading"><div><h4>Visual slide preview</h4><p>See where your products will appear. Blue = image area; amber = product details.</p></div><span>{ratio.toUpperCase()} SLIDE</span></div>
-        <div className="ep-visual-canvas" style={{ backgroundColor: `#${background.replace("#", "")}`, aspectRatio: String(ratioValue) }}>
+        <div className="ep-visual-canvas" onPointerMove={e => { if(!drag)return; const r=e.currentTarget.getBoundingClientRect(); const dx=(e.clientX-drag.x)/r.width*800; const dy=(e.clientY-drag.y)/r.height*450; const [x,y,x2,y2]=drag.rect; const w=x2-x,h=y2-y; const nx=Math.max(0,Math.min(800-w,Math.round(x+dx))); const ny=Math.max(0,Math.min(450-h,Math.round(y+dy))); setLayout(prev=>prev.map((s,i)=>i===drag.slot?({...s,[drag.section]:[nx,ny,nx+w,ny+h]}):s)); }} onPointerUp={() => setDrag(null)} onPointerCancel={() => setDrag(null)} style={{ touchAction:"none", backgroundColor: `#${background.replace("#", "")}`, aspectRatio: String(ratioValue) }}>
           {showHeader && <div className="ep-preview-header" style={{color:`#${fontColor.replace("#","")}`}}>{headerText || "Your heading"}{logoFile && <span className="ep-preview-logo">{logoFile.name.slice(0,18)}</span>}</div>}
           {showRule && <div className="ep-preview-rule"/>}
           {layout.map((slot, i) => <React.Fragment key={i}>
-            <div className="ep-visual-rect ep-visual-image" style={{ left: `${(autoCenter ? Math.max(0, Math.min(800 - (slot.img[2] - slot.img[0]), (slot.text[0] + slot.text[2]) / 2 - (slot.img[2] - slot.img[0]) / 2)) : slot.img[0]) / 8}%`, top: `${slot.img[1] / 4.5}%`, width: `${(slot.img[2] - slot.img[0]) / 8}%`, height: `${(slot.img[3] - slot.img[1]) / 4.5}%` }}>
+            <div className="ep-visual-rect ep-visual-image" style={{ left: `${(autoCenter ? Math.max(0, Math.min(800 - (slot.img[2] - slot.img[0]), (slot.text[0] + slot.text[2]) / 2 - (slot.img[2] - slot.img[0]) / 2)) : slot.img[0]) / 8}%`, top: `${slot.img[1] / 4.5}%`, width: `${(slot.img[2] - slot.img[0]) / 8}%`, height: `${(slot.img[3] - slot.img[1]) / 4.5}%`, cursor:"move", touchAction:"none" }} onPointerDown={e=>beginDrag(e,i,"img")}>
               <ImageIcon size={18}/><strong>Product {i + 1} image</strong><small>{slot.img[2]-slot.img[0]} × {slot.img[3]-slot.img[1]}</small>
             </div>
-            <div className="ep-visual-rect ep-visual-text" style={{ left: `${slot.text[0] / 8}%`, top: `${slot.text[1] / 4.5}%`, width: `${(slot.text[2] - slot.text[0]) / 8}%`, height: `${(slot.text[3] - slot.text[1]) / 4.5}%`, color: `#${fontColor.replace("#", "")}` }}>
+            <div className="ep-visual-rect ep-visual-text" style={{ left: `${slot.text[0] / 8}%`, top: `${slot.text[1] / 4.5}%`, width: `${(slot.text[2] - slot.text[0]) / 8}%`, height: `${(slot.text[3] - slot.text[1]) / 4.5}%`, color: `#${fontColor.replace("#", "")}`, cursor:"move", touchAction:"none" }} onPointerDown={e=>beginDrag(e,i,"text")}>
               <strong>Product {i + 1} details</strong><span>SKU / Name</span><span>Dimensions</span><span>Price</span>
             </div>
           </React.Fragment>)}
