@@ -129,6 +129,7 @@ async def excel_to_ppt(
     mapping: Annotated[str, Form()],
     layout: Annotated[str, Form()],
     style: Annotated[str, Form()],
+    logo: UploadFile | None = File(default=None),
 ):
     """Build a product catalogue presentation from an XLSX workbook and its embedded cell images."""
     from openpyxl import load_workbook
@@ -160,6 +161,10 @@ async def excel_to_ppt(
         font_name = str(style_data.get("font_name", "Arial"))[:80]
         font_color = str(style_data.get("font_color", "000000")).replace("#", "").upper()
         background_color = str(style_data.get("background_color", "FFFFFF")).replace("#", "").upper()
+        aspect_ratio = str(style_data.get("aspect_ratio", "16:9"))
+        ratio_map = {"16:9": 16 / 9, "4:3": 4 / 3, "A4 Landscape": 297 / 210, "A4 Portrait": 210 / 297}
+        if aspect_ratio not in ratio_map:
+            raise ValueError()
         if not re.fullmatch(r"[0-9A-F]{6}", font_color) or not re.fullmatch(r"[0-9A-F]{6}", background_color):
             raise ValueError()
     except (KeyError, TypeError, ValueError):
@@ -244,9 +249,25 @@ async def excel_to_ppt(
             raise HTTPException(400, "This workbook has more than 5,000 products. Split it into smaller workbooks.")
 
         prs = Presentation()
-        prs.slide_width = Inches(8)
-        prs.slide_height = Inches(4.5)
+        slide_width_in = 8.0
+        slide_height_in = slide_width_in / ratio_map[aspect_ratio]
+        prs.slide_width = Inches(slide_width_in)
+        prs.slide_height = Inches(slide_height_in)
         blank_layout = prs.slide_layouts[6]
+        header_text = str(style_data.get("header_text", ""))[:180]
+        show_header = bool(style_data.get("show_header", True))
+        show_rule = bool(style_data.get("show_rule", True))
+        logo_bytes = None
+        if logo is not None and logo.filename:
+            logo_ext = Path(logo.filename).suffix.lower()
+            if logo_ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                wb.close()
+                raise HTTPException(400, "Logo must be PNG, JPG, JPEG, or WEBP.")
+            logo_bytes = await logo.read()
+            if len(logo_bytes) > 5 * 1024 * 1024:
+                wb.close()
+                raise HTTPException(400, "Logo must be 5 MB or smaller.")
+        auto_center_image = bool(style_data.get("auto_center_image", True))
         for product_index, product in enumerate(products):
             slot_index = product_index % len(slots)
             if slot_index == 0:
@@ -254,17 +275,50 @@ async def excel_to_ppt(
                 fill = slide.background.fill
                 fill.solid()
                 fill.fore_color.rgb = RGBColor.from_string(background_color)
+                if show_header and header_text:
+                    head = slide.shapes.add_textbox(Inches(0.28), Inches(0.10), Inches(slide_width_in - 0.56), Inches(0.38))
+                    tf = head.text_frame
+                    tf.clear()
+                    p = tf.paragraphs[0]
+                    p.alignment = PP_ALIGN.LEFT
+                    run = p.add_run()
+                    run.text = header_text
+                    run.font.name = font_name
+                    run.font.size = Pt(max(10, font_size))
+                    run.font.bold = True
+                    run.font.color.rgb = RGBColor.from_string(font_color)
+                if show_rule:
+                    line_y = 0.58 if show_header else 0.22
+                    rule = slide.shapes.add_shape(1, Inches(0.28), Inches(line_y), Inches(slide_width_in - 0.56), Inches(0.012))
+                    rule.fill.solid()
+                    rule.fill.fore_color.rgb = RGBColor.from_string(font_color)
+                    rule.line.fill.background()
+                if logo_bytes:
+                    try:
+                        slide.shapes.add_picture(io.BytesIO(logo_bytes), Inches(slide_width_in - 1.05), Inches(0.08), width=Inches(0.72), height=Inches(0.42))
+                    except Exception:
+                        pass
             slot = slots[slot_index]
             if product["picture"] is not None:
                 try:
                     img_bytes = product["picture"]._data()
-                    x1, y1, x2, y2 = [float(v) / 100 for v in slot["img"]]
-                    slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(x1), Inches(y1), width=Inches(x2-x1), height=Inches(y2-y1))
+                    x1, y1, x2, y2 = [float(v) for v in slot["img"]]
+                    tx1, _, tx2, _ = [float(v) for v in slot["text"]]
+                    if auto_center_image:
+                        image_width = x2 - x1
+                        image_center = (tx1 + tx2) / 2
+                        x1 = max(0, min(800 - image_width, image_center - image_width / 2))
+                        x2 = x1 + image_width
+                    x1_in, y1_in = (x1 / 800) * slide_width_in, (y1 / 450) * slide_height_in
+                    width_in, height_in = ((x2 - x1) / 800) * slide_width_in, ((y2 - y1) / 450) * slide_height_in
+                    slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(x1_in), Inches(y1_in), width=Inches(width_in), height=Inches(height_in))
                 except Exception:
                     pass
 
-            tx1, ty1, tx2, ty2 = [float(v) / 100 for v in slot["text"]]
-            textbox = slide.shapes.add_textbox(Inches(tx1), Inches(ty1), Inches(tx2-tx1), Inches(ty2-ty1))
+            tx1, ty1, tx2, ty2 = [float(v) for v in slot["text"]]
+            tx1_in, ty1_in = (tx1 / 800) * slide_width_in, (ty1 / 450) * slide_height_in
+            text_width_in, text_height_in = ((tx2 - tx1) / 800) * slide_width_in, ((ty2 - ty1) / 450) * slide_height_in
+            textbox = slide.shapes.add_textbox(Inches(tx1_in), Inches(ty1_in), Inches(text_width_in), Inches(text_height_in))
             text_frame = textbox.text_frame
             text_frame.clear()
             text_frame.word_wrap = True
