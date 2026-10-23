@@ -296,4 +296,4 @@ async def excel_to_ppt(
         output = root / "product_catalogue.pptx"
         prs.save(output)
         from fastapi.responses import FileResponse
-        return FileResponse(output, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", filename="product_catalogue.pptx")
+        return StreamingResponse(io.BytesIO(output.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", headers={"Content-Disposition": 'attachment; filename="product_catalogue.pptx"'})
