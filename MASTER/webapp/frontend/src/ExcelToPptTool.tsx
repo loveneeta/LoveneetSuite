@@ -88,7 +88,6 @@ export default function ExcelToPptTool() {
   };
 
   return <main className="excel-ppt">
-    <header className="ep-head"><div className="ep-mark"><Presentation size={23}/></div><div><h2>Excel to Product Catalogue PPT</h2><p>Generate product slides from an Excel workbook with embedded images.</p></div></header>
     <section className="ep-intro"><div><span>PRODUCT CATALOGUE WORKFLOW</span><h3>Turn your product spreadsheet into a presentation.</h3><p>Map your Excel columns, choose 2 or 3 products per slide, adjust image/text placement, and download a PowerPoint catalogue.</p></div><FileSpreadsheet size={44}/></section>
     <section className="ep-panel"><div className="ep-title"><div><b>01</b><div><h3>Upload Excel workbook</h3><p>Supports .xlsx with product details and images embedded in worksheet cells.</p></div></div></div>
       <label className="ep-drop"><input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={e => void chooseFile(e.target.files?.[0] ?? null)}/><Upload size={24}/><strong>{file ? file.name : "Choose an Excel workbook"}</strong><small>{file ? `${(file.size / 1024).toFixed(0)} KB · ${headers.length} columns detected` : "Click to browse your device"}</small></label>
