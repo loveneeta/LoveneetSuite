@@ -1,6 +1,7 @@
 {
     "theme": "dark",
     "default_quality": 95,
+    "default_export_quality": 95,
     "default_output_folder": "",
     "window_state": "maximized"
 }

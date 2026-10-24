@@ -6,8 +6,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from PIL import Image
 
+try:
+    import pymupdf as fitz
+except ImportError:
+    try:
+        import fitz
+    except ImportError:
+        fitz = None
+
 app = FastAPI(title="Loveneet Suite Web API")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173","http://127.0.0.1:5173"], allow_methods=["*"], allow_headers=["*"])
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+env_origins = os.getenv("CORS_ORIGINS")
+if env_origins:
+    allowed_origins.extend([o.strip() for o in env_origins.split(",") if o.strip()])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins if os.getenv("ALLOW_ALL_CORS", "true").lower() != "true" else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 EXTS = {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}
 
 @app.get("/api/health")
@@ -96,6 +123,7 @@ async def organize(excel: Annotated[UploadFile, File()], image_archive: Annotate
 async def ppt_export(files: Annotated[list[UploadFile], File()], export_jpg: Annotated[bool, Form()] = True, export_png: Annotated[bool, Form()] = False, export_webp: Annotated[bool, Form()] = True, quality: Annotated[int, Form()] = 95):
     if not any([export_jpg,export_png,export_webp]): raise HTTPException(400,"Select an output format")
     if shutil.which("libreoffice") is None and shutil.which("soffice") is None: raise HTTPException(501,"PowerPoint export needs LibreOffice installed on the server")
+    if fitz is None: raise HTTPException(501,"PDF slide rendering requires PyMuPDF (pymupdf). Install pymupdf on the server.")
     from pptx import Presentation
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp); out=root/"exports"; out.mkdir()

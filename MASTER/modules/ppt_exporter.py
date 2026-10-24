@@ -239,7 +239,7 @@ class PPTExporterFrame(ctk.CTkFrame):
         settings = load_settings()
 
         self.quality_slider.set(
-            settings["default_export_quality"]
+            settings.get("default_export_quality", settings.get("default_quality", 95))
         )
 
         # =================================================

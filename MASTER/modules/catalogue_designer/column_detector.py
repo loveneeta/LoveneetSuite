@@ -7,11 +7,13 @@ from typing import Dict
 import sys
 import os
 
-# Add parent for imports
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-
-from data_models import ColumnType
+try:
+    from modules.catalogue_designer.data_models import ColumnType
+except ImportError:
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    from data_models import ColumnType
 
 
 class ColumnTypeDetector:
