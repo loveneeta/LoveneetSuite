@@ -17,11 +17,27 @@ import {
   Image as ImageIcon,
   Eye,
   RefreshCw,
-  FolderOpen
+  FolderOpen,
+  Filter,
+  ShieldCheck,
+  Tag
 } from "lucide-react";
 import "./ppt-excel.css";
 
-type Img = { id: string; name: string; mime: string; data: string; ocrText?: string };
+type Img = {
+  id: string;
+  name: string;
+  mime: string;
+  data: string;
+  ocrText?: string;
+  isLogo?: boolean;
+  role?: "product" | "logo" | "footer";
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+};
+
 type Slide = {
   slideNumber: number;
   sourceFile: string;
@@ -31,6 +47,7 @@ type Slide = {
   images: Img[];
   preview?: string;
 };
+
 type Col = { id: string; header: string; type: "text" | "image" };
 type Row = {
   id: string;
@@ -237,9 +254,10 @@ export default function PptExcelTool() {
   const [sel, setSel] = useState(0);
   const [cols, setCols] = useState<Col[]>(initialCols);
   const [rows, setRows] = useState<Row[]>([]);
-  const [mode, setMode] = useState<"slide" | "product">("slide");
+  const [mode, setMode] = useState<"slide" | "product">("product");
   const [source, setSource] = useState(true);
   const [embed, setEmbed] = useState(true);
+  const [filterLogos, setFilterLogos] = useState(true);
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [error, setError] = useState("");
@@ -251,18 +269,34 @@ export default function PptExcelTool() {
   const cur = slides[sel];
   const lines = cur ? [...cur.text, ...cur.tables.flat(2), ...cur.images.map(x => x.ocrText || "")].filter(Boolean) : [];
 
-  function makeRows(list: Slide[], currentCols = cols, currentMode = mode) {
+  function makeRows(list: Slide[], currentCols = cols, currentMode = mode, shouldFilter = filterLogos) {
     const out: Row[] = [];
     list.forEach(s => {
       const txt = [...s.text, ...s.tables.flat(2), ...s.images.map(x => x.ocrText || "")].filter(Boolean);
-      const imgList = currentMode === "product" && s.images.length ? s.images : [null];
+      
+      // Filter out images classified as logos/header/footer if filterLogos is enabled
+      const usableImages = shouldFilter
+        ? s.images.filter(im => !im.isLogo)
+        : s.images;
+
+      // In product mode, generate one row per real product image.
+      // If a slide has no product images, generate 1 row for the slide.
+      const imgList = currentMode === "product"
+        ? (usableImages.length ? usableImages : [null])
+        : [null];
+
       imgList.forEach(im => {
         const values: Record<string, string> = {};
         const images: Record<string, Img | null> = {};
+        
+        // Pick primary product photo (avoid logo)
+        const fallbackImg = usableImages[0] || s.images[0] || null;
+
         currentCols.forEach(c => {
           values[c.id] = c.type === "text" ? suggest(txt, c.header) : "";
-          images[c.id] = c.type === "image" ? im || s.images[0] || null : null;
+          images[c.id] = c.type === "image" ? (im || fallbackImg) : null;
         });
+
         out.push({
           id: uid(),
           slideNumber: s.slideNumber,
@@ -285,8 +319,28 @@ export default function PptExcelTool() {
     }));
     setCols(newCols);
     if (slides.length > 0) {
-      makeRows(slides, newCols);
+      makeRows(slides, newCols, mode, filterLogos);
     }
+  };
+
+  const toggleImageRole = (slideNumber: number, imageId: string) => {
+    const updated = slides.map(s => {
+      if (s.slideNumber !== slideNumber) return s;
+      return {
+        ...s,
+        images: s.images.map(im => {
+          if (im.id !== imageId) return im;
+          const nextIsLogo = !im.isLogo;
+          return {
+            ...im,
+            isLogo: nextIsLogo,
+            role: nextIsLogo ? "logo" : "product"
+          };
+        })
+      };
+    });
+    setSlides(updated);
+    makeRows(updated, cols, mode, filterLogos);
   };
 
   async function processPresentation() {
@@ -308,8 +362,21 @@ export default function PptExcelTool() {
           );
         }
 
-        setStatus(`Extracting ${file.name} locally in your browser…`);
+        setStatus(`Reading ${file.name} locally…`);
         const zip = await JSZip.loadAsync(file);
+
+        // Read presentation dimensions for position heuristics (e.g. 16:9 is 12192000 x 6858000 EMUs)
+        let sldWidth = 12192000, sldHeight = 6858000;
+        const presXmlText = await zip.file("ppt/presentation.xml")?.async("text");
+        if (presXmlText) {
+          const pxml = new DOMParser().parseFromString(presXmlText, "application/xml");
+          const sldSz = pxml.getElementsByTagNameNS("*", "sldSz")[0];
+          if (sldSz) {
+            sldWidth = Number(sldSz.getAttribute("cx") || sldWidth);
+            sldHeight = Number(sldSz.getAttribute("cy") || sldHeight);
+          }
+        }
+
         const slideNames = Object.keys(zip.files)
           .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
           .sort((a, b) => Number(a.match(/slide(\d+)/)?.[1]) - Number(b.match(/slide(\d+)/)?.[1]));
@@ -319,6 +386,19 @@ export default function PptExcelTool() {
         }
 
         setProgress({ current: 0, total: slideNames.length });
+
+        // First pass: parse all slides and extract picture nodes with geometry
+        type RawImgItem = {
+          embedId: string;
+          targetPath: string;
+          x: number;
+          y: number;
+          w: number;
+          h: number;
+        };
+
+        const slideRawImages: { slideIdx: number; texts: string[]; tables: string[][][]; items: RawImgItem[] }[] = [];
+        const imageFileSlideCounts = new Map<string, Set<number>>();
 
         for (let ix = 0; ix < slideNames.length; ix++) {
           const path = slideNames[ix];
@@ -364,14 +444,19 @@ export default function PptExcelTool() {
             });
           }
 
-          const images: Img[] = [];
-          const embeds = Array.from(xml.getElementsByTagNameNS("*", "blip"))
-            .map(n => n.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed"))
-            .filter((x): x is string => !!x);
+          // Extract picture nodes with their exact slide positioning
+          const rawItems: RawImgItem[] = [];
+          const blipNodes = Array.from(xml.getElementsByTagNameNS("*", "blip"));
 
-          for (let im = 0; im < embeds.length; im++) {
-            const target = rels.get(embeds[im]);
-            if (!target) continue;
+          blipNodes.forEach(blipNode => {
+            const embed = blipNode.getAttributeNS(
+              "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+              "embed"
+            );
+            if (!embed) return;
+            const target = rels.get(embed);
+            if (!target) return;
+
             const imagePath = target.startsWith("/")
               ? target.slice(1)
               : ("ppt/slides/" + target)
@@ -382,9 +467,66 @@ export default function PptExcelTool() {
                     return a;
                   }, [] as string[])
                   .join("/");
-            const imageFile = zip.file(imagePath);
+
+            // Traverse upward to find <a:xfrm> for position and dimension
+            let x = 0, y = 0, w = 0, h = 0;
+            let currNode: Node | null = blipNode;
+            while (currNode && currNode !== xml) {
+              if (currNode.nodeType === 1) {
+                const el = currNode as Element;
+                const xfrm = el.getElementsByTagNameNS("*", "xfrm")[0];
+                if (xfrm) {
+                  const off = xfrm.getElementsByTagNameNS("*", "off")[0];
+                  const ext = xfrm.getElementsByTagNameNS("*", "ext")[0];
+                  if (off) {
+                    x = Number(off.getAttribute("x") || 0);
+                    y = Number(off.getAttribute("y") || 0);
+                  }
+                  if (ext) {
+                    w = Number(ext.getAttribute("cx") || 0);
+                    h = Number(ext.getAttribute("cy") || 0);
+                  }
+                  break;
+                }
+              }
+              currNode = currNode.parentNode;
+            }
+
+            rawItems.push({
+              embedId: embed,
+              targetPath: imagePath,
+              x,
+              y,
+              w,
+              h
+            });
+
+            if (!imageFileSlideCounts.has(imagePath)) {
+              imageFileSlideCounts.set(imagePath, new Set());
+            }
+            imageFileSlideCounts.get(imagePath)!.add(ix + 1);
+          });
+
+          slideRawImages.push({
+            slideIdx: ix + 1,
+            texts,
+            tables,
+            items: rawItems
+          });
+
+          setProgress({ current: ix + 1, total: slideNames.length });
+        }
+
+        // Second pass: classify images based on repetition & position
+        for (const slideData of slideRawImages) {
+          const images: Img[] = [];
+
+          for (let im = 0; im < slideData.items.length; im++) {
+            const item = slideData.items[im];
+            const imageFile = zip.file(item.targetPath);
             if (!imageFile) continue;
-            const ext = (imagePath.split(".").pop() || "png").toLowerCase();
+
+            const ext = (item.targetPath.split(".").pop() || "png").toLowerCase();
             const data = await imageFile.async("base64");
             const mime =
               ({
@@ -397,32 +539,69 @@ export default function PptExcelTool() {
                 tif: "image/tiff",
                 tiff: "image/tiff"
               } as Record<string, string>)[ext] || "image/png";
+
+            // Relative positioning
+            const relX = sldWidth > 0 ? item.x / sldWidth : 0;
+            const relY = sldHeight > 0 ? item.y / sldHeight : 0;
+            const relW = sldWidth > 0 ? item.w / sldWidth : 0;
+            const relH = sldHeight > 0 ? item.h / sldHeight : 0;
+
+            // Heuristics:
+            // 1. Logo at top-right corner (relY < 22%, relX > 65%, moderate size)
+            const isTopRightCorner = relY < 0.22 && relX > 0.65 && relW < 0.35 && relH < 0.25;
+
+            // 2. Logo at top-left corner (relY < 22%, relX < 28%, moderate size)
+            const isTopLeftCorner = relY < 0.22 && relX < 0.28 && relW < 0.35 && relH < 0.25;
+
+            // 3. Footer mark or bottom footer line (relY > 80% of slide)
+            const isFooter = relY > 0.80;
+
+            // 4. Divider line or thin banner (height < 2.5% of slide or very wide thin line)
+            const isDividerLine = relH < 0.025 || (relW > 0.4 && relH < 0.035);
+
+            // 5. Repeated brand image across multiple slides (e.g. logo appears on 2+ slides)
+            const slideCountForImg = imageFileSlideCounts.get(item.targetPath)?.size || 1;
+            const isRepeatedAcrossSlides = slideNames.length >= 2 && slideCountForImg >= 2;
+
+            const isLogo = isTopRightCorner || isTopLeftCorner || isFooter || isDividerLine || isRepeatedAcrossSlides;
+            const role = isFooter || isDividerLine ? "footer" : isLogo ? "logo" : "product";
+
             images.push({
-              id: "s" + (ix + 1) + "i" + (im + 1),
-              name: imagePath.split("/").pop() || `image_${im}.${ext}`,
+              id: "s" + slideData.slideIdx + "i" + (im + 1),
+              name: item.targetPath.split("/").pop() || `image_${im}.${ext}`,
               mime,
-              data
+              data,
+              isLogo,
+              role,
+              x: item.x,
+              y: item.y,
+              w: item.w,
+              h: item.h
             });
           }
 
           all.push({
-            slideNumber: ix + 1,
+            slideNumber: slideData.slideIdx,
             sourceFile: file.name,
-            title: texts[0] || `Slide ${ix + 1}`,
-            text: texts,
-            tables,
+            title: slideData.texts[0] || `Slide ${slideData.slideIdx}`,
+            text: slideData.texts,
+            tables: slideData.tables,
             images
           });
-
-          setProgress({ current: ix + 1, total: slideNames.length });
         }
       }
 
       setSlides(all);
       setSel(0);
-      makeRows(all, cols, mode);
+      makeRows(all, cols, mode, filterLogos);
+
       const totalImages = all.reduce((sum, s) => sum + s.images.length, 0);
-      setStatus(`✓ Extracted ${all.length} slide(s) and ${totalImages} image(s) locally. Files were not uploaded.`);
+      const logoCount = all.reduce((sum, s) => sum + s.images.filter(im => im.isLogo).length, 0);
+      const productCount = totalImages - logoCount;
+
+      setStatus(
+        `✓ Extracted ${all.length} slide(s) · ${productCount} product photos found (${logoCount} corner logos/footers automatically filtered).`
+      );
     } catch (e: any) {
       setError(e.message || "Could not extract presentation.");
     } finally {
@@ -457,7 +636,7 @@ export default function PptExcelTool() {
       const p = JSON.parse(localStorage.getItem("pptExcelProfiles") || "{}");
       if (p[name]) {
         setCols(p[name]);
-        if (slides.length) makeRows(slides, p[name]);
+        if (slides.length) makeRows(slides, p[name], mode, filterLogos);
       }
     } catch {}
   }
@@ -478,7 +657,7 @@ export default function PptExcelTool() {
         };
       }
       setSlides(copy);
-      makeRows(copy);
+      makeRows(copy, cols, mode, filterLogos);
       setStatus("✓ OCR complete. Review extracted image text.");
     } catch (e: any) {
       setError("OCR failed: " + (e.message || "unknown error"));
@@ -575,6 +754,8 @@ export default function PptExcelTool() {
     });
 
   const totalExtractedImages = slides.reduce((sum, s) => sum + s.images.length, 0);
+  const totalLogos = slides.reduce((sum, s) => sum + s.images.filter(im => im.isLogo).length, 0);
+  const totalProducts = totalExtractedImages - totalLogos;
 
   return (
     <section className="pptx-tool">
@@ -584,13 +765,13 @@ export default function PptExcelTool() {
           <Sparkles size={13} /> 100% In-Browser Engine
         </span>
         <span className="pptx-badge">
-          <CheckCircle2 size={13} /> Zero Cloud Upload
+          <ShieldCheck size={13} /> Zero Cloud Upload
+        </span>
+        <span className="pptx-badge">
+          <Filter size={13} /> Auto-Excludes Corner Logos & Footers
         </span>
         <span className="pptx-badge">
           <ImageIcon size={13} /> Embedded Excel Cell Images
-        </span>
-        <span className="pptx-badge">
-          <FileSpreadsheet size={13} /> XLSX Output
         </span>
       </div>
 
@@ -600,7 +781,7 @@ export default function PptExcelTool() {
           <span className="pptx-step-num">01</span>
           <div>
             <h3>Select PowerPoint Presentation</h3>
-            <p>Upload .pptx files to parse text, structured tables, and embedded images.</p>
+            <p>Upload .pptx files to parse text, structured tables, and product photos.</p>
           </div>
         </div>
 
@@ -684,8 +865,8 @@ export default function PptExcelTool() {
           <div className="pptx-panel-head">
             <span className="pptx-step-num">02</span>
             <div>
-              <h3>Configure Excel Columns</h3>
-              <p>Choose a 1-click industry preset or customize columns and field types.</p>
+              <h3>Configure Excel Columns & Logo Filter</h3>
+              <p>Choose an industry preset, customize columns, and filter out brand logos and footer lines.</p>
             </div>
           </div>
           <button
@@ -770,30 +951,55 @@ export default function PptExcelTool() {
           ))}
         </div>
 
-        {/* Options Row */}
+        {/* Options Box with Logo Filter */}
         <div className="pptx-options-box">
-          <div className="pptx-mode-radios">
-            <label className={mode === "slide" ? "selected" : ""}>
+          {/* Logo & Footer Filter Callout */}
+          <div className="pptx-filter-banner">
+            <label className="pptx-filter-toggle">
               <input
-                type="radio"
-                checked={mode === "slide"}
-                onChange={() => {
-                  setMode("slide");
-                  if (slides.length) makeRows(slides, cols, "slide");
+                type="checkbox"
+                checked={filterLogos}
+                onChange={e => {
+                  setFilterLogos(e.target.checked);
+                  makeRows(slides, cols, mode, e.target.checked);
                 }}
               />
-              <span>1 Row per Slide</span>
+              <div className="pptx-filter-text">
+                <strong>🛡️ Filter out Brand Logos, Headers & Footer Lines (Recommended)</strong>
+                <small>
+                  Automatically ignores images located in the top corners (logos), bottom lines (footers), and images repeated across slides.
+                </small>
+              </div>
             </label>
+            {slides.length > 0 && (
+              <span className="pptx-filter-count-badge">
+                {filterLogos ? `Filtered ${totalLogos} logo(s)` : "All images included"}
+              </span>
+            )}
+          </div>
+
+          <div className="pptx-mode-radios">
             <label className={mode === "product" ? "selected" : ""}>
               <input
                 type="radio"
                 checked={mode === "product"}
                 onChange={() => {
                   setMode("product");
-                  if (slides.length) makeRows(slides, cols, "product");
+                  if (slides.length) makeRows(slides, cols, "product", filterLogos);
                 }}
               />
-              <span>1 Row per Image (Product Mode)</span>
+              <span>📦 1 Row per Product Photo (Multi-Product Slides)</span>
+            </label>
+            <label className={mode === "slide" ? "selected" : ""}>
+              <input
+                type="radio"
+                checked={mode === "slide"}
+                onChange={() => {
+                  setMode("slide");
+                  if (slides.length) makeRows(slides, cols, "slide", filterLogos);
+                }}
+              />
+              <span>📑 1 Row per Slide</span>
             </label>
           </div>
 
@@ -820,7 +1026,7 @@ export default function PptExcelTool() {
             <button
               type="button"
               className="pptx-secondary"
-              onClick={() => makeRows(slides, cols, mode)}
+              onClick={() => makeRows(slides, cols, mode, filterLogos)}
               disabled={!slides.length}
             >
               <RefreshCw size={13} /> Refresh Mappings
@@ -854,7 +1060,7 @@ export default function PptExcelTool() {
             <div>
               <h3>Slide Browser & Content Inspector</h3>
               <p>
-                Review extracted text snippets and embedded images. Click text to map it directly into fields.
+                Review extracted text snippets and photos. You can click any image badge to toggle between <strong>Product Photo</strong> and <strong>Brand Logo</strong>.
               </p>
             </div>
           </div>
@@ -866,26 +1072,29 @@ export default function PptExcelTool() {
                 <strong>SLIDES ({slides.length})</strong>
               </div>
               <div className="pptx-slides-scroll">
-                {slides.map((s, i) => (
-                  <button
-                    key={s.sourceFile + s.slideNumber + i}
-                    type="button"
-                    className={`pptx-slide-btn ${sel === i ? "selected" : ""}`}
-                    onClick={() => setSel(i)}
-                  >
-                    <div className="pptx-slide-meta">
-                      <span className="pptx-slide-badge">Slide {s.slideNumber}</span>
-                      {s.images.length > 0 && (
-                        <span className="pptx-img-pill">
-                          <ImageIcon size={10} /> {s.images.length}
-                        </span>
-                      )}
-                    </div>
-                    <small className="pptx-slide-title">
-                      {s.title.slice(0, 38) || `Slide ${s.slideNumber}`}
-                    </small>
-                  </button>
-                ))}
+                {slides.map((s, i) => {
+                  const productImagesCount = s.images.filter(im => !im.isLogo).length;
+                  return (
+                    <button
+                      key={s.sourceFile + s.slideNumber + i}
+                      type="button"
+                      className={`pptx-slide-btn ${sel === i ? "selected" : ""}`}
+                      onClick={() => setSel(i)}
+                    >
+                      <div className="pptx-slide-meta">
+                        <span className="pptx-slide-badge">Slide {s.slideNumber}</span>
+                        {productImagesCount > 0 && (
+                          <span className="pptx-img-pill" title={`${productImagesCount} product photo(s)`}>
+                            <ImageIcon size={10} /> {productImagesCount}
+                          </span>
+                        )}
+                      </div>
+                      <small className="pptx-slide-title">
+                        {s.title.slice(0, 38) || `Slide ${s.slideNumber}`}
+                      </small>
+                    </button>
+                  );
+                })}
               </div>
             </aside>
 
@@ -935,15 +1144,32 @@ export default function PptExcelTool() {
                 )}
               </div>
 
-              {/* Gallery of Images in Slide */}
+              {/* Gallery of Images in Slide with Logo / Product Badge */}
               {cur?.images.length > 0 && (
                 <div className="pptx-block">
-                  <h4>Embedded Slide Images ({cur.images.length})</h4>
+                  <div className="pptx-gallery-head">
+                    <h4>Slide Images ({cur.images.length})</h4>
+                    <small>Click badge to toggle Product vs Logo</small>
+                  </div>
                   <div className="pptx-gallery">
                     {cur.images.map(im => (
-                      <div key={im.id} className="pptx-gallery-card">
+                      <div
+                        key={im.id}
+                        className={`pptx-gallery-card ${im.isLogo ? "is-logo-card" : "is-product-card"}`}
+                      >
                         <img src={uri(im)} alt={im.name} />
                         <small>{im.name}</small>
+
+                        {/* Interactive Toggle for Logo vs Product */}
+                        <button
+                          type="button"
+                          className={`pptx-role-badge ${im.isLogo ? "role-logo" : "role-product"}`}
+                          onClick={() => toggleImageRole(cur.slideNumber, im.id)}
+                          title="Click to toggle between Product photo and Brand logo"
+                        >
+                          {im.isLogo ? "🏷️ Logo (Excluded)" : "📦 Product (Active)"}
+                        </button>
+
                         {im.ocrText && <p className="pptx-ocr-preview">{im.ocrText}</p>}
                       </div>
                     ))}
@@ -985,7 +1211,7 @@ export default function PptExcelTool() {
                             <option value="">— No Image —</option>
                             {cur?.images.map(im => (
                               <option key={im.id} value={im.id}>
-                                {im.name}
+                                {im.isLogo ? `[Logo] ${im.name}` : `[Photo] ${im.name}`}
                               </option>
                             ))}
                           </select>
@@ -1049,11 +1275,16 @@ export default function PptExcelTool() {
                       <td key={c.id}>
                         {c.type === "image" ? (
                           r.images[c.id] ? (
-                            <img
-                              className="pptx-cellimg"
-                              src={uri(r.images[c.id]!)}
-                              alt="Cell product"
-                            />
+                            <div className="pptx-cell-img-wrap">
+                              <img
+                                className="pptx-cellimg"
+                                src={uri(r.images[c.id]!)}
+                                alt="Cell product"
+                              />
+                              {r.images[c.id]?.isLogo && (
+                                <span className="pptx-logo-tag">Logo</span>
+                              )}
+                            </div>
                           ) : (
                             <span className="pptx-empty-cell">No Image</span>
                           )
@@ -1082,7 +1313,7 @@ export default function PptExcelTool() {
             <div className="pptx-export-note">
               <CheckCircle2 size={16} />
               <span>
-                <strong>{rows.length} rows ready.</strong> Product photos will be embedded directly inside
+                <strong>{rows.length} product row(s) ready.</strong> Product photos will be embedded directly inside
                 worksheet cells (not external links).
               </span>
             </div>

@@ -885,3 +885,136 @@
     justify-content: center;
   }
 }
+
+/* Logo & Footer Filter Styles */
+.pptx-filter-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  background: #141f36;
+  border: 1px solid #293d66;
+  border-radius: 9px;
+  padding: 12px 14px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.pptx-filter-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 250px;
+}
+
+.pptx-filter-toggle input {
+  margin-top: 3px;
+  accent-color: #6366f1;
+}
+
+.pptx-filter-text strong {
+  display: block;
+  font-size: 12px;
+  color: #e2e8f0;
+}
+
+.pptx-filter-text small {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.pptx-filter-count-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+  background: #0c2d48;
+  border: 1px solid #144a73;
+  padding: 5px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.pptx-gallery-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.pptx-gallery-head small {
+  font-size: 10px;
+  color: #64748b;
+}
+
+.pptx-gallery-card.is-logo-card {
+  opacity: 0.6;
+  border-color: #334155;
+  background: #0d131f;
+}
+
+.pptx-gallery-card.is-logo-card:hover {
+  opacity: 0.95;
+}
+
+.pptx-gallery-card.is-product-card {
+  border-color: #384b70;
+}
+
+.pptx-role-badge {
+  display: inline-block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 4px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 5px;
+  border: 0;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+
+.pptx-role-badge.role-logo {
+  background: #2b1f24;
+  color: #fca5a5;
+  border: 1px solid #5c2c35;
+}
+
+.pptx-role-badge.role-logo:hover {
+  background: #3d262d;
+  color: #fecaca;
+}
+
+.pptx-role-badge.role-product {
+  background: #112d22;
+  color: #6ee7b7;
+  border: 1px solid #165b40;
+}
+
+.pptx-role-badge.role-product:hover {
+  background: #143d2c;
+  color: #a7f3d0;
+}
+
+.pptx-cell-img-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.pptx-logo-tag {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 8px;
+  font-weight: 800;
+  background: #ef4444;
+  color: white;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}

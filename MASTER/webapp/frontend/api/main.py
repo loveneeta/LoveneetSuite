@@ -439,7 +439,16 @@ async def ppt_excel_extract(file: UploadFile = File(...)):
                         texts.extend([" | ".join(row) for row in table if any(row)])
                     if getattr(shape, "shape_type", None) == 13:
                         pic = shape.image
-                        images.append({"id": "s" + str(si) + "i" + str(ix), "name": "slide_" + str(si) + "_image_" + str(len(images)+1) + "." + (pic.ext or "png"), "mime": pic.content_type or "image/png", "data": base64.b64encode(pic.blob).decode("ascii")})
+                        sw = float(prs.slide_width) if getattr(prs, "slide_width", None) else 9144000.0
+                        sh = float(prs.slide_height) if getattr(prs, "slide_height", None) else 5143500.0
+                        rx = float(shape.left) / sw
+                        ry = float(shape.top) / sh
+                        rw = float(shape.width) / sw
+                        rh = float(shape.height) / sh
+                        is_top_corner = ry < 0.22 and (rx > 0.65 or rx < 0.28) and rw < 0.35 and rh < 0.25
+                        is_footer = ry > 0.80 or rh < 0.025 or (rw > 0.4 and rh < 0.035)
+                        is_logo = is_top_corner or is_footer
+                        images.append({"id": "s" + str(si) + "i" + str(ix), "name": "slide_" + str(si) + "_image_" + str(len(images)+1) + "." + (pic.ext or "png"), "mime": pic.content_type or "image/png", "data": base64.b64encode(pic.blob).decode("ascii"), "isLogo": is_logo, "role": "logo" if is_logo else "product"})
                 except Exception:
                     continue
             preview = None
