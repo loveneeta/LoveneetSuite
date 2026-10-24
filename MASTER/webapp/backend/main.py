@@ -372,7 +372,7 @@ async def excel_to_ppt(
 @app.post("/api/ppt-excel/extract")
 async def ppt_excel_extract(file: UploadFile = File(...)):
     import base64
-    import fitz
+
     from pptx import Presentation
     ext = Path(file.filename or "").suffix.lower()
     if ext not in {".pptx", ".ppt"}:
