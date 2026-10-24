@@ -368,3 +368,130 @@ async def excel_to_ppt(
         prs.save(output)
         from fastapi.responses import FileResponse
         return StreamingResponse(io.BytesIO(output.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", headers={"Content-Disposition": 'attachment; filename="product_catalogue.pptx"'})
+
+
+@app.post("/api/ppt-excel/extract")
+async def ppt_excel_extract(file: UploadFile = File(...)):
+    import base64
+    import fitz
+    from pptx import Presentation
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".pptx", ".ppt"}:
+        raise HTTPException(400, "Upload a .pptx or .ppt PowerPoint file.")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        original = root / safe_name(file.filename or "presentation.pptx")
+        original.write_bytes(await file.read())
+        pptx_path = original
+        converter = shutil.which("libreoffice") or shutil.which("soffice")
+        if ext == ".ppt":
+            if not converter:
+                raise HTTPException(501, "Legacy .ppt conversion requires LibreOffice on the server. Save the file as .pptx and retry.")
+            result = subprocess.run([converter, "--headless", "--convert-to", "pptx", "--outdir", str(root), str(original)], capture_output=True, text=True, timeout=180)
+            pptx_path = root / (original.stem + ".pptx")
+            if result.returncode or not pptx_path.exists():
+                raise HTTPException(422, "Could not convert legacy PPT file: " + (result.stderr or result.stdout)[-300:])
+        try:
+            prs = Presentation(str(pptx_path))
+        except Exception as exc:
+            raise HTTPException(422, "PowerPoint could not be opened: " + str(exc)[:200])
+        preview_pdf = None
+        if converter:
+            rendered = subprocess.run([converter, "--headless", "--convert-to", "pdf", "--outdir", str(root), str(pptx_path)], capture_output=True, text=True, timeout=180)
+            candidate = root / (pptx_path.stem + ".pdf")
+            if rendered.returncode == 0 and candidate.exists():
+                preview_pdf = candidate
+        pdf_doc = fitz.open(str(preview_pdf)) if preview_pdf else None
+        slides = []
+        for si, slide in enumerate(prs.slides, start=1):
+            texts, tables, images, title = [], [], [], ""
+            for ix, shape in enumerate(slide.shapes):
+                try:
+                    if getattr(shape, "has_text_frame", False):
+                        val = shape.text.strip()
+                        if val:
+                            texts.append(val)
+                            if getattr(shape, "is_placeholder", False) and not title:
+                                title = val
+                    if getattr(shape, "has_table", False):
+                        table = [[cell.text.strip() for cell in row.cells] for row in shape.table.rows]
+                        tables.append(table)
+                        texts.extend([" | ".join(row) for row in table if any(row)])
+                    if getattr(shape, "shape_type", None) == 13:
+                        pic = shape.image
+                        images.append({"id": "s" + str(si) + "i" + str(ix), "name": "slide_" + str(si) + "_image_" + str(len(images)+1) + "." + (pic.ext or "png"), "mime": pic.content_type or "image/png", "data": base64.b64encode(pic.blob).decode("ascii")})
+                except Exception:
+                    continue
+            preview = None
+            if pdf_doc and si <= len(pdf_doc):
+                try:
+                    preview = base64.b64encode(pdf_doc[si-1].get_pixmap(matrix=fitz.Matrix(.65,.65), alpha=False).tobytes("jpeg")).decode("ascii")
+                except Exception:
+                    pass
+            slides.append({"slideNumber":si,"sourceFile":file.filename or "presentation.pptx","title":title or (texts[0][:100] if texts else "Slide "+str(si)),"text":texts,"tables":tables,"images":images,"preview":preview})
+        if pdf_doc:
+            pdf_doc.close()
+        if not slides:
+            raise HTTPException(422, "No slides were found.")
+        return {"sourceFile":file.filename,"slideCount":len(slides),"slides":slides}
+
+
+@app.post("/api/ppt-excel/export")
+async def ppt_excel_export(payload: dict):
+    import base64
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    if not isinstance(payload, dict) or not isinstance(payload.get("columns"), list) or not isinstance(payload.get("rows"), list):
+        raise HTTPException(400, "Invalid workbook payload.")
+    columns, rows = payload["columns"], payload["rows"]
+    if not columns or len(columns) > 100:
+        raise HTTPException(400, "Configure between 1 and 100 columns.")
+    if len(rows) > 1500:
+        raise HTTPException(413, "Export up to 1,500 rows at a time. Split the presentation into smaller batches.")
+    headers = [str(c.get("header") or "Column")[:200] for c in columns]
+    if payload.get("include_source"):
+        headers += ["Source File", "Slide Number"]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp); out = root / "PPT_to_Excel_with_Images.xlsx"; wb = Workbook(); ws = wb.active; ws.title = "PPT Extract"
+        ws.append(headers); ws.freeze_panes = "A2"; ws.auto_filter.ref = "A1:" + get_column_letter(len(headers)) + str(len(rows)+1)
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="263D70"); cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+        ws.row_dimensions[1].height = 32
+        for ci, col in enumerate(columns, 1):
+            ws.column_dimensions[get_column_letter(ci)].width = 22 if col.get("type") == "image" else min(42,max(15,len(headers[ci-1])+3))
+        if payload.get("include_source"):
+            ws.column_dimensions[get_column_letter(len(headers)-1)].width = 30
+        errors = []
+        for ri, row in enumerate(rows, 2):
+            vals, pics = row.get("values") or {}, row.get("images") or {}
+            for ci, col in enumerate(columns, 1):
+                if col.get("type") == "image" and payload.get("include_images", True):
+                    ws.cell(row=ri,column=ci,value="")
+                    picdata = pics.get(col.get("id"))
+                    if picdata and picdata.get("data"):
+                        try:
+                            raw = base64.b64decode(picdata["data"], validate=True)
+                            imgpath = root / ("img_" + str(ri) + "_" + str(ci) + ".dat"); imgpath.write_bytes(raw)
+                            pic = XLImage(str(imgpath)); scale = min(128/max(pic.width,1),88/max(pic.height,1),1)
+                            pic.width=max(1,int(pic.width*scale)); pic.height=max(1,int(pic.height*scale)); pic.anchor=ws.cell(row=ri,column=ci).coordinate; ws.add_image(pic)
+                            ws.row_dimensions[ri].height=max(ws.row_dimensions[ri].height or 15,70)
+                        except Exception as exc:
+                            errors.append("Row "+str(ri)+", "+str(col.get("header"))+": "+str(exc)[:150])
+                else:
+                    ws.cell(row=ri,column=ci,value=str(vals.get(col.get("id")) or "")[:32000])
+            if payload.get("include_source"):
+                ws.cell(row=ri,column=len(columns)+1,value=str(row.get("source_file") or "")[:500])
+                ws.cell(row=ri,column=len(columns)+2,value=row.get("slide_number") or "")
+        if errors:
+            ew = wb.create_sheet("Processing Errors"); ew.append(["Error"])
+            for e in errors: ew.append([e])
+            ew.column_dimensions["A"].width=100
+        wb.save(out)
+        try:
+            check = load_workbook(out)
+            check.close()
+        except Exception as exc:
+            raise HTTPException(500, "Generated workbook validation failed: " + str(exc)[:180])
+        return StreamingResponse(io.BytesIO(out.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="PPT_to_Excel_with_Images.xlsx"'})
