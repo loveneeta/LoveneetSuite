@@ -96,7 +96,6 @@ async def organize(excel: Annotated[UploadFile, File()], image_archive: Annotate
 async def ppt_export(files: Annotated[list[UploadFile], File()], export_jpg: Annotated[bool, Form()] = True, export_png: Annotated[bool, Form()] = False, export_webp: Annotated[bool, Form()] = True, quality: Annotated[int, Form()] = 95):
     if not any([export_jpg,export_png,export_webp]): raise HTTPException(400,"Select an output format")
     if shutil.which("libreoffice") is None and shutil.which("soffice") is None: raise HTTPException(501,"PowerPoint export needs LibreOffice installed on the server")
-    import fitz
     from pptx import Presentation
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp); out=root/"exports"; out.mkdir()
@@ -395,13 +394,6 @@ async def ppt_excel_extract(file: UploadFile = File(...)):
             prs = Presentation(str(pptx_path))
         except Exception as exc:
             raise HTTPException(422, "PowerPoint could not be opened: " + str(exc)[:200])
-        preview_pdf = None
-        if converter:
-            rendered = subprocess.run([converter, "--headless", "--convert-to", "pdf", "--outdir", str(root), str(pptx_path)], capture_output=True, text=True, timeout=180)
-            candidate = root / (pptx_path.stem + ".pdf")
-            if rendered.returncode == 0 and candidate.exists():
-                preview_pdf = candidate
-        pdf_doc = fitz.open(str(preview_pdf)) if preview_pdf else None
         slides = []
         for si, slide in enumerate(prs.slides, start=1):
             texts, tables, images, title = [], [], [], ""
@@ -423,14 +415,7 @@ async def ppt_excel_extract(file: UploadFile = File(...)):
                 except Exception:
                     continue
             preview = None
-            if pdf_doc and si <= len(pdf_doc):
-                try:
-                    preview = base64.b64encode(pdf_doc[si-1].get_pixmap(matrix=fitz.Matrix(.65,.65), alpha=False).tobytes("jpeg")).decode("ascii")
-                except Exception:
-                    pass
             slides.append({"slideNumber":si,"sourceFile":file.filename or "presentation.pptx","title":title or (texts[0][:100] if texts else "Slide "+str(si)),"text":texts,"tables":tables,"images":images,"preview":preview})
-        if pdf_doc:
-            pdf_doc.close()
         if not slides:
             raise HTTPException(422, "No slides were found.")
         return {"sourceFile":file.filename,"slideCount":len(slides),"slides":slides}
