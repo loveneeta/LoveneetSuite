@@ -7,7 +7,50 @@ type Col={id:string;header:string;type:"text"|"image"};
 type Row={id:string;slideNumber:number;sourceFile:string;values:Record<string,string>;images:Record<string,Img|null>};
 const uid=()=>Math.random().toString(36).slice(2,10),uri=(i:Img)=>`data:${i.mime};base64,${i.data}`;
 const initial=["Product Name","Item Code","Material","Length","Width","Height","Description","Product Image"];
-function suggest(lines:string[],header:string){const h=header.toLowerCase();const re=h.includes("name")||h.includes("title")?/product\s*name|item\s*name|title|name\s*:/i:h.includes("code")||h.includes("sku")||h.includes("model")?/item\s*code|sku|model|code\s*:/i:h.includes("material")||h.includes("wood")?/material|made of|wood|metal|fabric/i:h.includes("length")?/length|\bL\s*[:=]/i:h.includes("width")?/width|\bW\s*[:=]/i:h.includes("height")?/height|\bH\s*[:=]/i:h.includes("description")?/description|features?|details?/i:null;const line=re&&lines.find(x=>re.test(x));return line?line.replace(/^\s*[^:：=]{1,35}\s*[:：=]\s*/,"").trim()||line.trim():"";}
+function parseProductFields(lines:string[]){
+ const raw=lines.map(x=>x.replace(/\s+/g," ").trim()).filter(Boolean),all=raw.join(" | "),fields:Record<string,string>={};
+ const skuLine=raw.find(x=>/^\s*\d{4,10}\s*(?:[|–—:-])/.test(x)||/\b(?:SKU|ITEM\s*CODE|MODEL)\s*[:#-]?\s*[A-Z0-9-]{3,}\b/i.test(x));
+ if(skuLine){const m=skuLine.match(/^\s*(\d{4,10})\s*(?:[|–—:-])/);const labeled=skuLine.match(/\b(?:SKU|ITEM\s*CODE|MODEL)\s*[:#-]?\s*([A-Z0-9-]{3,})\b/i);fields.sku=m?.[1]||labeled?.[1]||"";}
+ const dims:{unit:string;values:string[]}[]=[];
+ const dimRe=/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)(?:\s*(CM|CMS|CENTIMETERS?|INCH(?:ES)?|IN)\b)?/ig;
+ for(const line of raw){let m:RegExpExecArray|null;while((m=dimRe.exec(line))!==null){const unit=(m[4]||(/\bCM\b/i.test(line)?"CM":/\bIN(?:CH(?:ES)?)?\b/i.test(line)?"IN":"")).toUpperCase();dims.push({unit:unit.startsWith("C")?"CM":unit.startsWith("I")?"IN":"",values:[m[1],m[2],m[3]]});}dimRe.lastIndex=0;}
+ const cm=dims.find(d=>d.unit==="CM"),inch=dims.find(d=>d.unit==="IN"),unitless=dims.find(d=>!d.unit);
+ const dimension=(d:{unit:string;values:string[]}|undefined,index:number)=>d?.values[index]||"";
+ fields.lengthCm=dimension(cm||(!inch?unitless:undefined),0);fields.widthCm=dimension(cm||(!inch?unitless:undefined),1);fields.heightCm=dimension(cm||(!inch?unitless:undefined),2);
+ fields.lengthIn=dimension(inch,0);fields.widthIn=dimension(inch,1);fields.heightIn=dimension(inch,2);
+ const cbm=all.match(/\bCBM\s*[:=]?\s*(\d+(?:\.\d+)?)/i);fields.cbm=cbm?.[1]||"";
+ const priceRe=/(?:\b(?:price|retail|wholesale|trade|cost|usd|eur|gbp|inr|aud|aed)\b\s*[:=-]?\s*)?([₹$€£])?\s*(\d+(?:[.,]\d{1,4})?)\s*(USD|EUR|GBP|INR|AUD|AED|\$|€|£|₹)?/ig;
+ const prices:{value:string;currency:string;label:string}[]=[];
+ for(const line of raw){if(!/\b(price|retail|wholesale|trade|cost)\b|[$€£₹]/i.test(line))continue;let m:RegExpExecArray|null;while((m=priceRe.exec(line))!==null){const value=m[2]?.replace(",",".");if(!value||!/[0-9]/.test(value))continue;const before=line.slice(Math.max(0,m.index-18),m.index);if(/\b(?:CM|IN|CBM)\s*$/i.test(before))continue;const curr=(m[3]||m[1]||"").toUpperCase();const currency=({"$":"USD","€":"EUR","£":"GBP","₹":"INR"} as Record<string,string>)[curr]||curr;const label=(line.match(/\b(price|retail|wholesale|trade|cost)\b/i)||[])[1]||"";if(!prices.some(p=>p.value===value&&p.currency===currency&&p.label===label))prices.push({value,currency,label});}priceRe.lastIndex=0;}
+ fields.prices=JSON.stringify(prices);
+ const materialLine=raw.find(x=>/\b(?:mango wood|sheesham|acacia|oak|pine|bamboo|teak|metal|iron|marble|travertine|wood|fabric|leather|glass|stainless steel)\b/i.test(x));
+ fields.material=materialLine?materialLine.replace(/^material\s*[:=-]\s*/i,""):"";
+ const titleLine=raw.find(x=>!/(?:\d+(?:\.\d+)?\s*[x×*]\s*\d|\bCBM\b|\b(?:price|retail|wholesale|trade|cost)\b|\b(?:CM|INCHES?)\b|\b(?:mango wood|sheesham|acacia|oak|pine|bamboo|teak|metal|iron|marble|wood|fabric)\b)/i.test(x)&&x.length>1);
+ fields.name=titleLine?titleLine.replace(/^\s*\d{4,10}\s*[|–—:-]\s*/,"").replace(/^\s*(?:product\s*name|name)\s*[:=-]\s*/i,"").trim():"";
+ fields.description=raw.filter(x=>x!==titleLine&&!/^\s*\d{4,10}\s*[|–—:-]/.test(x)).join(" | ");
+ fields.raw=all;
+ return fields;
+}
+function suggest(lines:string[],header:string){
+ const h=header.toLowerCase(),p=parseProductFields(lines);
+ if(/sku|item\s*code|product\s*code|model\s*(?:no|number)?/.test(h))return p.sku||"";
+ if(/product\s*name|item\s*name|^name$|title/.test(h))return p.name||"";
+ if(/material|wood\s*type/.test(h))return p.material||"";
+ if(/cbm|cubic/.test(h))return p.cbm||"";
+ if(/price|cost|retail|wholesale|trade/.test(h)){
+  const prices=JSON.parse(p.prices||"[]") as {value:string;currency:string;label:string}[];
+  const n=Number((h.match(/\b(\d+)\b/)||[])[1]||1)-1,price=prices[n];
+  if(/currency|curr\b/.test(h))return price?.currency||"";
+  return price?.value||"";
+ }
+ const unitIn=/\bin\b|inch/.test(h),unitCm=/\bcm\b|centimeter/.test(h);
+ if(/length|^l\b/.test(h))return unitIn?p.lengthIn:unitCm?p.lengthCm:(p.lengthCm||p.lengthIn);
+ if(/width|^w\b/.test(h))return unitIn?p.widthIn:unitCm?p.widthCm:(p.widthCm||p.widthIn);
+ if(/height|^h\b/.test(h))return unitIn?p.heightIn:unitCm?p.heightCm:(p.heightCm||p.heightIn);
+ if(/description|details|features/.test(h))return p.description;
+ const re=h.includes("name")||h.includes("title")?/product\s*name|item\s*name|title|name\s*:/i:h.includes("code")||h.includes("sku")||h.includes("model")?/item\s*code|sku|model|code\s*:/i:h.includes("material")||h.includes("wood")?/material|made of|wood|metal|fabric/i:h.includes("length")?/length|\bL\s*[:=]/i:h.includes("width")?/width|\bW\s*[:=]/i:h.includes("height")?/height|\bH\s*[:=]/i:null;
+ const line=re&&lines.find(x=>re.test(x));return line?line.replace(/^\s*[^:：=]{1,35}\s*[:：=]\s*/,"").trim()||line.trim():"";
+}
 function getProfiles():Record<string,Col[]>{try{return JSON.parse(typeof localStorage!=="undefined"?localStorage.getItem("pptExcelProfiles")||"{}":"{}")}catch{return {}}}
 export default function PptExcelTool(){
  const [files,SF]=useState<File[]>([]),[slides,SS]=useState<Slide[]>([]),[sel,SEL]=useState(0),[cols,SC]=useState<Col[]>(initial.map((h,i)=>({id:"c"+i,header:h,type:/image/i.test(h)?"image":"text"}))),[rows,SR]=useState<Row[]>([]),[mode,SM]=useState("slide"),[source,SOURCE]=useState(true),[embed,EMBED]=useState(true),[status,STATUS]=useState(""),[error,ERROR]=useState(""),[busy,BUSY]=useState(false),[ocr,OCR]=useState(false),[profile,PROFILE]=useState("");
