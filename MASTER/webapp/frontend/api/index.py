@@ -1,14 +1,19 @@
 """
 Vercel entrypoint for the Loveneet Suite FastAPI backend.
-
-This file is used when the Vercel project root is MASTER/webapp/frontend.
-It imports the existing FastAPI application rather than duplicating API routes.
 """
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BACKEND_DIR = PROJECT_ROOT.parent / "backend"
-sys.path.insert(0, str(BACKEND_DIR))
+API_DIR = Path(__file__).resolve().parent
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 
-from main import app  # noqa: E402,F401
+# Also allow local backend resolution if present
+BACKEND_DIR = API_DIR.parents[1] / "backend"
+if BACKEND_DIR.exists() and str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+try:
+    from .main import app  # noqa: F401
+except ImportError:
+    from main import app  # noqa: F401
