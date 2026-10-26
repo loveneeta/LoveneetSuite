@@ -12,13 +12,21 @@
     "preview": "vite preview --host 0.0.0.0",
     "desktop:dev": "electron .",
     "desktop:build": "vite build && electron-builder --dir",
-    "desktop:dist": "vite build && electron-builder --win nsis"
+    "desktop:dist": "vite build && electron-builder --win nsis",
+    "desktop:publish": "vite build && electron-builder --win nsis --publish always"
   },
   "build": {
     "appId": "com.loveneet.suite",
     "productName": "Loveneet Suite",
     "copyright": "Copyright © 2026 Loveneet Suite",
     "electronDist": "node_modules/electron/dist",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "loveneeta",
+        "repo": "LoveneetSuite"
+      }
+    ],
     "directories": {
       "output": "../../dist-electron"
     },
@@ -51,6 +59,7 @@
     }
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
     "lucide-react": "^1.61.0",

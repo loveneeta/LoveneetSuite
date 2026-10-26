@@ -6,10 +6,84 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { autoUpdater } = require("electron-updater");
 const LocalDatabase = require("./database.cjs");
 
 let mainWindow = null;
 let dbInstance = null;
+
+// Configure autoUpdater
+autoUpdater.autoDownload = false; // User controls download via UI
+autoUpdater.autoInstallOnAppQuit = false; // Safe user-approved restart only
+autoUpdater.allowPrerelease = false;
+
+// Update Status State
+const updateStatus = {
+  status: "idle", // 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  currentVersion: app.getVersion(),
+  latestVersion: null,
+  releaseNotes: null,
+  releaseDate: null,
+  progress: null,
+  error: null,
+  lastChecked: null,
+  fallbackUrl: "https://github.com/loveneeta/LoveneetSuite/releases/latest"
+};
+
+function broadcastUpdateStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("updater:statusChanged", updateStatus);
+  }
+}
+
+autoUpdater.on("checking-for-update", () => {
+  updateStatus.status = "checking";
+  updateStatus.error = null;
+  broadcastUpdateStatus();
+});
+
+autoUpdater.on("update-available", (info) => {
+  updateStatus.status = "available";
+  updateStatus.latestVersion = info.version;
+  updateStatus.releaseNotes = typeof info.releaseNotes === "string" ? info.releaseNotes : null;
+  updateStatus.releaseDate = info.releaseDate;
+  updateStatus.lastChecked = new Date().toISOString();
+  updateStatus.error = null;
+  broadcastUpdateStatus();
+});
+
+autoUpdater.on("update-not-available", (info) => {
+  updateStatus.status = "not-available";
+  updateStatus.latestVersion = info.version;
+  updateStatus.lastChecked = new Date().toISOString();
+  updateStatus.error = null;
+  broadcastUpdateStatus();
+});
+
+autoUpdater.on("download-progress", (progressObj) => {
+  updateStatus.status = "downloading";
+  updateStatus.progress = {
+    percent: Math.round(progressObj.percent || 0),
+    transferred: progressObj.transferred,
+    total: progressObj.total,
+    bytesPerSecond: progressObj.bytesPerSecond
+  };
+  broadcastUpdateStatus();
+});
+
+autoUpdater.on("update-downloaded", (info) => {
+  updateStatus.status = "downloaded";
+  updateStatus.latestVersion = info.version;
+  updateStatus.error = null;
+  broadcastUpdateStatus();
+});
+
+autoUpdater.on("error", (err) => {
+  updateStatus.status = "error";
+  updateStatus.error = err ? (err.message || String(err)) : "Failed to check or download update";
+  updateStatus.lastChecked = new Date().toISOString();
+  broadcastUpdateStatus();
+});
 
 // Enforce single application instance on Windows
 const gotTheLock = app.requestSingleInstanceLock();
@@ -66,6 +140,15 @@ async function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+
+  // Background check for desktop updates (6s after window launch, only if packaged)
+  setTimeout(() => {
+    if (app.isPackaged) {
+      autoUpdater.checkForUpdates().catch((err) => {
+        console.warn("Background update check skipped:", err?.message || err);
+      });
+    }
+  }, 6000);
 }
 
 app.whenReady().then(async () => {
@@ -414,5 +497,45 @@ function setupIpcHandlers() {
     return dbInstance.query(
       "SELECT * FROM sync_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 100;"
     );
+  });
+
+  // Desktop Application Auto-Updater IPC Handlers
+  ipcMain.handle("updater:getStatus", () => {
+    updateStatus.currentVersion = app.getVersion();
+    return updateStatus;
+  });
+
+  ipcMain.handle("updater:check", async () => {
+    updateStatus.status = "checking";
+    updateStatus.error = null;
+    broadcastUpdateStatus();
+    try {
+      const res = await autoUpdater.checkForUpdates();
+      return { success: true, updateInfo: res?.updateInfo };
+    } catch (err) {
+      updateStatus.status = "error";
+      updateStatus.error = err ? (err.message || String(err)) : "Failed to check for updates";
+      broadcastUpdateStatus();
+      return { success: false, error: updateStatus.error };
+    }
+  });
+
+  ipcMain.handle("updater:download", async () => {
+    updateStatus.status = "downloading";
+    updateStatus.error = null;
+    broadcastUpdateStatus();
+    try {
+      await autoUpdater.downloadUpdate();
+      return { success: true };
+    } catch (err) {
+      updateStatus.status = "error";
+      updateStatus.error = err ? (err.message || String(err)) : "Failed to download update";
+      broadcastUpdateStatus();
+      return { success: false, error: updateStatus.error };
+    }
+  });
+
+  ipcMain.handle("updater:quitAndInstall", () => {
+    autoUpdater.quitAndInstall(false, true);
   });
 }

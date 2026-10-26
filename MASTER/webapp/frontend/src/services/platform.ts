@@ -46,6 +46,13 @@ declare global {
         getPending: () => Promise<any[]>;
         triggerSync: () => Promise<any>;
       };
+      updater?: {
+        getStatus: () => Promise<UpdateStatus>;
+        checkForUpdates: () => Promise<{ success: boolean; updateInfo?: any; error?: string }>;
+        downloadUpdate: () => Promise<{ success: boolean; error?: string }>;
+        quitAndInstall: () => Promise<void>;
+        onStatusChange: (callback: (status: UpdateStatus) => void) => () => void;
+      };
     };
   }
 }
@@ -291,5 +298,72 @@ export const syncService = {
 
   isOnline(): boolean {
     return typeof navigator !== "undefined" ? navigator.onLine : true;
+  }
+};
+
+// Desktop Auto-Updater Service
+export interface UpdateStatus {
+  status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseNotes: string | null;
+  releaseDate: string | null;
+  progress: {
+    percent: number;
+    transferred: number;
+    total: number;
+    bytesPerSecond: number;
+  } | null;
+  error: string | null;
+  lastChecked: string | null;
+  fallbackUrl: string;
+}
+
+export const updateService = {
+  async getStatus(): Promise<UpdateStatus> {
+    if (isDesktop() && window.electronAPI?.updater) {
+      return await window.electronAPI.updater.getStatus();
+    }
+    return {
+      status: "not-available",
+      currentVersion: "1.1.0",
+      latestVersion: "1.1.0",
+      releaseNotes: null,
+      releaseDate: null,
+      progress: null,
+      error: null,
+      lastChecked: new Date().toISOString(),
+      fallbackUrl: "https://github.com/loveneeta/LoveneetSuite/releases/latest"
+    };
+  },
+
+  async checkForUpdates(): Promise<{ success: boolean; updateInfo?: any; error?: string }> {
+    if (isDesktop() && window.electronAPI?.updater) {
+      return await window.electronAPI.updater.checkForUpdates();
+    }
+    return {
+      success: true,
+      error: "Web version is automatically up to date via Vercel deployments."
+    };
+  },
+
+  async downloadUpdate(): Promise<{ success: boolean; error?: string }> {
+    if (isDesktop() && window.electronAPI?.updater) {
+      return await window.electronAPI.updater.downloadUpdate();
+    }
+    return { success: false, error: "Updates are only downloaded in the desktop app." };
+  },
+
+  quitAndInstall(): void {
+    if (isDesktop() && window.electronAPI?.updater) {
+      window.electronAPI.updater.quitAndInstall();
+    }
+  },
+
+  onStatusChange(callback: (status: UpdateStatus) => void): () => void {
+    if (isDesktop() && window.electronAPI?.updater) {
+      return window.electronAPI.updater.onStatusChange(callback);
+    }
+    return () => {};
   }
 };

@@ -11,7 +11,7 @@ import "./pdf-excel.css";
 import ExcelToPptTool from "./ExcelToPptTool";
 import PptExcelTool from "./PptExcelTool";
 import FileCollectorTool from "./FileCollectorTool";
-import { isDesktop, storageAdapter, syncService } from "./services/platform";
+import { isDesktop, storageAdapter, syncService, updateService, UpdateStatus } from "./services/platform";
 
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -100,16 +100,52 @@ function App(){
  const [isOnline,setIsOnline]=useState(typeof navigator!=="undefined"?navigator.onLine:true);
  const [showSettingsModal,setShowSettingsModal]=useState(false);
  const [dbStats,setDbStats]=useState<any>(null);
+ const [updateState,setUpdateState]=useState<UpdateStatus|null>(null);
+ const [isCheckingUpdate,setIsCheckingUpdate]=useState(false);
+
  React.useEffect(()=>{
    const onOn=()=>setIsOnline(true), onOff=()=>setIsOnline(false);
    window.addEventListener("online",onOn);
    window.addEventListener("offline",onOff);
-   return ()=>{ window.removeEventListener("online",onOn); window.removeEventListener("offline",onOff); };
+   updateService.getStatus().then(setUpdateState);
+   const unsub=updateService.onStatusChange(s=>setUpdateState(s));
+   return ()=>{
+     window.removeEventListener("online",onOn);
+     window.removeEventListener("offline",onOff);
+     unsub();
+   };
  },[]);
  const openSettings=async()=>{
    const stats=await storageAdapter.getStats();
    setDbStats(stats);
+   const u=await updateService.getStatus();
+   setUpdateState(u);
    setShowSettingsModal(true);
+ };
+ const handleCheckForUpdates=async()=>{
+   setIsCheckingUpdate(true);
+   const res=await updateService.checkForUpdates();
+   setIsCheckingUpdate(false);
+   const updated=await updateService.getStatus();
+   setUpdateState(updated);
+   if(updated.status==="available"){
+     setNotice({type:"success",text:`Update v${updated.latestVersion} is available! Click Download Update in Settings.`});
+   }else if(updated.status==="not-available"){
+     setNotice({type:"success",text:"Loveneet Suite is completely up to date!"});
+   }else if(updated.status==="error"){
+     setNotice({type:"error",text:`Update check error: ${updated.error||"Could not connect to release server"}`});
+   }
+ };
+ const handleDownloadUpdate=async()=>{
+   const res=await updateService.downloadUpdate();
+   if(!res.success&&res.error){
+     setNotice({type:"error",text:`Download failed: ${res.error}`});
+   }
+ };
+ const handleInstallAndRestart=()=>{
+   if(window.confirm("Loveneet Suite will restart to finish installing this update. Are you ready to proceed?")){
+     updateService.quitAndInstall();
+   }
  };
  const handleBackup=async()=>{
    const res=await storageAdapter.backupDatabase();
@@ -147,6 +183,21 @@ function App(){
   </div>
 )}</header><div className="page-wrap"><div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{page==="dashboard"?"Good work starts here.":active.name}</h1><p>{page==="dashboard"?"Your product, purchasing and presentation tools, together in one place.":"Upload files, choose settings, and download your results."}</p></div><div className="heading-mark"><Sparkles size={22}/></div></div>
  {notice&&<div className={"notice "+notice.type}><span>{notice.type==="success"?<CheckCircle2 size={19}/>:<AlertCircle size={19}/>}</span><p>{notice.text}</p><button onClick={()=>setNotice(null)}><X size={16}/></button></div>}
+ {isDesktop() && (updateState?.status === "available" || updateState?.status === "downloaded") && (
+   <div className="notice info" style={{background:"#1e1b4b",border:"1px solid #4338ca",display:"flex",alignItems:"center",gap:10}}>
+     <Sparkles size={18} color="#818cf8"/>
+     <p style={{margin:0,flex:1}}>
+       {updateState.status === "available"
+         ? `A new desktop version (v${updateState.latestVersion}) is available!`
+         : `Update v${updateState.latestVersion} has been downloaded and is ready to install.`}
+     </p>
+     {updateState.status === "available" ? (
+       <button type="button" className="collector-btn-primary" style={{padding:"4px 10px",fontSize:12}} onClick={openSettings}>View in Settings</button>
+     ) : (
+       <button type="button" className="collector-btn-primary" style={{padding:"4px 10px",fontSize:12,background:"#16a34a"}} onClick={handleInstallAndRestart}>Restart & Update</button>
+     )}
+   </div>
+ )}
  {page==="pdf-excel"&&<PdfExcelTool/>}{page==="excel-ppt"&&<ExcelToPptTool/>}{page==="ppt-excel"&&<PptExcelTool/>}{page==="collector"&&<FileCollectorTool/>}
  {page==="dashboard"&&<><section className="welcome-card"><div><div className="welcome-pill"><span className="status-dot"/> WORKSPACE READY</div><h2>From product files<br/>to <em>presentation-ready.</em></h2><p>Choose a tool to start. Files upload only when you run a task.</p><button className="primary-btn" onClick={()=>nav("convert")}>Convert images <Images size={17}/></button></div><div className="art-orbit"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="orbit-core"><Images size={42}/></div><div className="float-chip chip-one"><FileSpreadsheet size={17}/></div><div className="float-chip chip-two"><Presentation size={17}/></div><div className="float-chip chip-three"><FolderTree size={17}/></div></div></section><div className="section-head"><div><h2>Tools</h2><p>Choose a workflow to get started</p></div><span className="tool-count">07 TOOLS</span></div><section className="tool-grid">{tools.filter(t=>t.id!=="dashboard").map((t,i)=><button className="tool-card" key={t.id} onClick={()=>nav(t.id)}><div className={"tool-icon tone-"+(i%3)}><t.icon size={22}/></div><span className="card-arrow">↗</span><h3>{t.name}</h3><p>{({"convert":"Batch convert and resize product images","organize":"Organize images using Excel product data","ppt":"Export presentation slides as images","pdf-excel":"Extract purchase-order and quotation rows into a 27-column Excel template","excel-ppt":"Generate product catalogue slides from Excel data and embedded images","ppt-excel":"Extract presentation text, tables and images into a custom Excel workbook","collector":"Flatten nested folders and collect files with subfolder prefix naming"} as Record<string,string>)[t.id]}</p><span className="open-tool">Open tool →</span></button>)}</section><div className="privacy-foot"><span><CheckCircle2 size={16}/> PDF extraction runs locally in your browser</span><span>LOVENEET SUITE</span></div></>}
  {page==="convert"&&<form className="workspace-grid" onSubmit={convert}><section className="panel"><div className="panel-title"><span className="step">01</span><div><h2>Choose images</h2><p>Select one or more images from your device.</p></div></div>{picker("Choose image files","image/*",true,images,setImages,"JPG, PNG, WEBP, BMP, TIFF")}</section><section className="panel"><div className="panel-title"><span className="step">02</span><div><h2>Conversion settings</h2><p>Choose the output format and quality.</p></div></div><div className="form-grid">{field("Output format",<select value={format} onChange={e=>setFormat(e.target.value)}><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WEBP</option><option value="bmp">BMP</option><option value="tiff">TIFF</option></select>)}{field("Quality",<div className="range-line"><input type="range" min="10" max="100" value={quality} onChange={e=>setQuality(+e.target.value)}/><strong>{quality}%</strong></div>)}{field("Resize width (px)",<input type="number" min="1" max="12000" placeholder="Original" value={width} onChange={e=>setWidth(e.target.value)}/>)}{field("Resize height (px)",<input type="number" min="1" max="12000" placeholder="Original" value={height} onChange={e=>setHeight(e.target.value)}/>)}</div><div className="hint-box">Enter both dimensions to resize. Leave both blank to preserve original dimensions.</div></section><div className="action-bar"><span>{images.length} image file(s) selected</span><button className="primary-btn" disabled={busy}>{busy?"Processing…":"Convert & download ZIP"} <Download size={17}/></button></div></form>}
@@ -184,6 +235,87 @@ function App(){
             )}
           </div>
         )}
+        <div style={{background:"#141e33",border:"1px solid #1e293b",borderRadius:8,padding:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <strong><Sparkles size={16} color="#38bdf8"/> Desktop Software Updates</strong>
+            <span style={{fontSize:11,color:"#94a3b8"}}>
+              {isDesktop() ? `Desktop v${updateState?.currentVersion || "1.1.0"}` : "Web v1.1.0"}
+            </span>
+          </div>
+
+          {!isOnline && (
+            <div style={{background:"#2e1065",color:"#e9d5ff",padding:"6px 10px",borderRadius:6,fontSize:12,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+              <AlertCircle size={14}/> Offline — Connect to internet to check for software updates.
+            </div>
+          )}
+
+          <div style={{fontSize:12,color:"#cbd5e1",display:"flex",flexDirection:"column",gap:3,marginBottom:10}}>
+            <div>Current Version: <strong>{updateState?.currentVersion || "1.1.0"}</strong></div>
+            <div>Latest Release: <strong style={{color:updateState?.status==="available"?"#38bdf8":"#f8fafc"}}>{updateState?.latestVersion ? `v${updateState.latestVersion}` : "Up to date"}</strong></div>
+            {updateState?.lastChecked && (
+              <div style={{fontSize:11,color:"#94a3b8"}}>
+                Last checked: {new Date(updateState.lastChecked).toLocaleTimeString()}
+              </div>
+            )}
+          </div>
+
+          {updateState?.status === "downloading" && updateState.progress && (
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#94a3b8",marginBottom:4}}>
+                <span>Downloading update: {updateState.progress.percent}%</span>
+                <span>{Math.round((updateState.progress.transferred || 0)/(1024*1024))}MB / {Math.round((updateState.progress.total || 0)/(1024*1024))}MB</span>
+              </div>
+              <div style={{width:"100%",height:6,background:"#0f172a",borderRadius:3,overflow:"hidden"}}>
+                <div style={{width:`${updateState.progress.percent}%`,height:"100%",background:"#38bdf8",transition:"width 0.3s"}}/>
+              </div>
+            </div>
+          )}
+
+          {updateState?.status === "error" && (
+            <div style={{background:"#450a0a",color:"#fca5a5",padding:"6px 10px",borderRadius:6,fontSize:12,marginBottom:8}}>
+              Update status: {updateState.error}
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:4}}>
+            {isDesktop() ? (
+              <>
+                {updateState?.status === "available" && (
+                  <button type="button" className="collector-btn-primary" onClick={handleDownloadUpdate}>
+                    <Download size={14}/> Download Update v{updateState.latestVersion}
+                  </button>
+                )}
+                {updateState?.status === "downloaded" && (
+                  <button type="button" className="collector-btn-primary" style={{background:"#16a34a"}} onClick={handleInstallAndRestart}>
+                    <RefreshCw size={14}/> Install & Restart App
+                  </button>
+                )}
+                {(updateState?.status === "idle" || updateState?.status === "not-available" || updateState?.status === "error") && (
+                  <button type="button" className="collector-btn-secondary" disabled={isCheckingUpdate || !isOnline} onClick={handleCheckForUpdates}>
+                    <RefreshCw size={14} className={isCheckingUpdate ? "spin" : ""}/> {isCheckingUpdate ? "Checking..." : "Check for Updates"}
+                  </button>
+                )}
+                {updateState?.status === "error" && (
+                  <button type="button" className="collector-btn-secondary" onClick={handleCheckForUpdates}>
+                    Retry
+                  </button>
+                )}
+              </>
+            ) : (
+              <div style={{fontSize:12,color:"#94a3b8"}}>
+                Web version is automatically continuously updated on Vercel.
+              </div>
+            )}
+            <a
+              href="https://github.com/loveneeta/LoveneetSuite/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{fontSize:11.5,color:"#38bdf8",textDecoration:"none",marginLeft:"auto"}}
+            >
+              Manual Download ↗
+            </a>
+          </div>
+        </div>
         <div style={{display:"flex",gap:10,marginTop:6}}>
           {isDesktop() && (
             <>

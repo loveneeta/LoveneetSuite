@@ -1,0 +1,90 @@
+name: Release Windows Desktop Application
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Publish as draft release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Publish as prerelease'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify Web & Desktop Code
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: MASTER/webapp/frontend/package-lock.json
+
+      - name: Install Dependencies
+        run: npm --prefix MASTER/webapp/frontend ci
+
+      - name: Run Web Build (Vercel Compatibility Check)
+        run: npm --prefix MASTER/webapp/frontend run build
+
+      - name: Run SQLite Database Unit Test
+        run: node MASTER/webapp/frontend/electron/database.cjs
+
+  build-and-release:
+    name: Build & Publish Windows Installer
+    needs: verify
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: MASTER/webapp/frontend/package-lock.json
+
+      - name: Install Dependencies
+        run: npm --prefix MASTER/webapp/frontend ci
+
+      - name: Build Web Application
+        run: npm --prefix MASTER/webapp/frontend run build
+
+      - name: Build and Publish Electron Package to GitHub Releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm --prefix MASTER/webapp/frontend run desktop:publish
+
+      - name: Upload Release Artifacts to Workflow Run
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installer-artifacts
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+            MASTER/dist-electron/*.exe
+            MASTER/dist-electron/*.yml
+            MASTER/dist-electron/*.blockmap
+          if-no-files-found: warn
