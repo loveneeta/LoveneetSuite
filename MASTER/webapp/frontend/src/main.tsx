@@ -12,6 +12,7 @@ import ExcelToPptTool from "./ExcelToPptTool";
 import PptExcelTool from "./PptExcelTool";
 import FileCollectorTool from "./FileCollectorTool";
 import UserGuideModal from "./components/UserGuideModal";
+import { convertImagesLocally, organizeImagesLocally } from "./services/imageTools";
 import { isDesktop, storageAdapter, syncService, updateService, UpdateStatus } from "./services/platform";
 
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerUrl;
