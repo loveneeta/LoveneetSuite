@@ -13,10 +13,9 @@ import {
   AlertTriangle, 
   WifiOff, 
   Wifi, 
-  ExternalLink,
   BookOpen
 } from "lucide-react";
-import { USER_GUIDES, ToolGuide } from "../data/userGuides";
+import { USER_GUIDES, ToolUserGuide } from "../data/userGuides";
 import "../user-guide.css";
 
 interface UserGuideModalProps {
@@ -61,13 +60,14 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  const activeGuide: ToolGuide = USER_GUIDES[selectedToolId] || USER_GUIDES["dashboard"];
+  const activeGuide: ToolUserGuide = USER_GUIDES[selectedToolId] || USER_GUIDES["dashboard"];
   const ToolIcon = TOOL_ICONS[selectedToolId] || HelpCircle;
 
   // Search filter across steps, controls, and troubleshooting
   const query = searchQuery.trim().toLowerCase();
 
   const filteredSteps = useMemo(() => {
+    if (!activeGuide?.stepByStep) return [];
     if (!query) return activeGuide.stepByStep;
     return activeGuide.stepByStep.filter(
       (s) =>
@@ -78,10 +78,11 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
   }, [activeGuide, query]);
 
   const filteredControls = useMemo(() => {
-    if (!query) return activeGuide.buttonAndOptionReference;
-    return activeGuide.buttonAndOptionReference.filter(
+    if (!activeGuide?.controlsReference) return [];
+    if (!query) return activeGuide.controlsReference;
+    return activeGuide.controlsReference.filter(
       (c) =>
-        c.controlName.toLowerCase().includes(query) ||
+        c.name.toLowerCase().includes(query) ||
         c.type.toLowerCase().includes(query) ||
         c.purpose.toLowerCase().includes(query) ||
         c.whenToUse.toLowerCase().includes(query)
@@ -89,11 +90,12 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
   }, [activeGuide, query]);
 
   const filteredTroubleshooting = useMemo(() => {
+    if (!activeGuide?.troubleshooting) return [];
     if (!query) return activeGuide.troubleshooting;
     return activeGuide.troubleshooting.filter(
       (t) =>
-        t.problem.toLowerCase().includes(query) ||
-        t.probableCause.toLowerCase().includes(query) ||
+        t.issue.toLowerCase().includes(query) ||
+        t.cause.toLowerCase().includes(query) ||
         t.solution.toLowerCase().includes(query)
     );
   }, [activeGuide, query]);
@@ -101,14 +103,21 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="guide-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="guide-title">
+    <div 
+      className="guide-modal-backdrop" 
+      onClick={onClose} 
+      role="dialog" 
+      aria-modal="true" 
+      aria-labelledby="guide-title"
+      style={{ zIndex: 99999 }}
+    >
       <div className="guide-modal" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <header className="guide-header">
           <div className="guide-header-title">
             <BookOpen size={20} color="#38bdf8" />
             <h2 id="guide-title">Loveneet Suite User Guide</h2>
-            <span className="guide-badge">In-App Documentation</span>
+            <span className="guide-badge">{activeGuide.badge || "Documentation"}</span>
           </div>
 
           <div className="guide-search-wrap">
@@ -116,7 +125,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
             <input
               type="text"
               className="guide-search-input"
-              placeholder={`Search ${activeGuide.name} guide...`}
+              placeholder={`Search ${activeGuide.title} guide...`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -151,7 +160,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                     }}
                   >
                     <Icon size={16} className="guide-nav-icon" />
-                    <span>{guide.name}</span>
+                    <span>{guide.title}</span>
                   </button>
                   {isSelected && (
                     <div className="guide-subnav">
@@ -176,10 +185,10 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               <div className="guide-tool-hero-top">
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <ToolIcon size={26} color="#38bdf8" />
-                  <h1>{activeGuide.name}</h1>
+                  <h1>{activeGuide.title}</h1>
                 </div>
-                <div className={`guide-offline-pill ${activeGuide.offlineRequirements.worksOffline ? "fully-offline" : "local-hybrid"}`}>
-                  {activeGuide.offlineRequirements.worksOffline ? (
+                <div className={`guide-offline-pill ${activeGuide.offlineAndRequirements?.worksOffline ? "fully-offline" : "local-hybrid"}`}>
+                  {activeGuide.offlineAndRequirements?.worksOffline ? (
                     <>
                       <WifiOff size={13} />
                       <span>100% Offline Compatible</span>
@@ -192,7 +201,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                   )}
                 </div>
               </div>
-              <p>{activeGuide.overview.description}</p>
+              <p>{activeGuide.tagline || activeGuide.overview?.description}</p>
             </div>
 
             {/* Section A: Overview */}
@@ -202,23 +211,31 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                 <h3>Overview & Key Benefits</h3>
               </div>
               
+              <div style={{ color: "#cbd5e1", marginBottom: 14, lineHeight: 1.6 }}>
+                {activeGuide.overview?.description}
+              </div>
+
               <div className="guide-card-grid">
-                <div className="guide-mini-card">
-                  <strong>Key Benefits</strong>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
-                    {activeGuide.overview.benefits.map((b, i) => (
-                      <li key={i} style={{ marginBottom: 4 }}>{b}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="guide-mini-card">
-                  <strong>Typical Use Cases</strong>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
-                    {activeGuide.overview.typicalUseCases.map((u, i) => (
-                      <li key={i} style={{ marginBottom: 4 }}>{u}</li>
-                    ))}
-                  </ul>
-                </div>
+                {activeGuide.overview?.benefits && (
+                  <div className="guide-mini-card">
+                    <strong>Key Benefits</strong>
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
+                      {activeGuide.overview.benefits.map((b, i) => (
+                        <li key={i} style={{ marginBottom: 4 }}>{b}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {activeGuide.overview?.useCases && (
+                  <div className="guide-mini-card">
+                    <strong>Typical Use Cases</strong>
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
+                      {activeGuide.overview.useCases.map((u, i) => (
+                        <li key={i} style={{ marginBottom: 4 }}>{u}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </section>
 
@@ -230,36 +247,40 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               </div>
 
               <div className="guide-card-grid">
-                <div className="guide-mini-card">
-                  <strong>Required Input Files</strong>
-                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
-                    {activeGuide.beforeYouStart.requiredInputs.map((req, i) => (
-                      <li key={i} style={{ marginBottom: 4 }}>{req}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="guide-mini-card">
-                  <strong>Supported Formats & Extensions</strong>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                    {activeGuide.beforeYouStart.supportedExtensions.map((ext, i) => (
-                      <span key={i} className="guide-control-badge">{ext}</span>
-                    ))}
+                {activeGuide.beforeYouStart?.requiredInputs && (
+                  <div className="guide-mini-card">
+                    <strong>Required Input Files</strong>
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
+                      {activeGuide.beforeYouStart.requiredInputs.map((req, i) => (
+                        <li key={i} style={{ marginBottom: 4 }}>{req}</li>
+                      ))}
+                    </ul>
                   </div>
-                </div>
+                )}
 
-                {activeGuide.beforeYouStart.requiredColumnsOrStructure && (
+                {activeGuide.beforeYouStart?.supportedFormats && (
+                  <div className="guide-mini-card">
+                    <strong>Supported Formats & Extensions</strong>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                      {activeGuide.beforeYouStart.supportedFormats.map((ext, i) => (
+                        <span key={i} className="guide-control-badge">{ext}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {activeGuide.beforeYouStart?.requiredStructure && activeGuide.beforeYouStart.requiredStructure.length > 0 && (
                   <div className="guide-mini-card" style={{ gridColumn: "1 / -1" }}>
                     <strong>Required Columns / Structure</strong>
                     <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12.5 }}>
-                      {activeGuide.beforeYouStart.requiredColumnsOrStructure.map((col, i) => (
+                      {activeGuide.beforeYouStart.requiredStructure.map((col, i) => (
                         <li key={i} style={{ marginBottom: 4 }}>{col}</li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                {activeGuide.beforeYouStart.limitations && (
+                {activeGuide.beforeYouStart?.limitations && activeGuide.beforeYouStart.limitations.length > 0 && (
                   <div className="guide-mini-card" style={{ gridColumn: "1 / -1", borderColor: "#334155" }}>
                     <strong style={{ color: "#fbbf24", display: "flex", alignItems: "center", gap: 6 }}>
                       <AlertTriangle size={15} /> Limitations & Rules
@@ -323,7 +344,7 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                       {filteredControls.map((c, i) => (
                         <tr key={i}>
                           <td>
-                            <span className="guide-control-badge">{c.controlName}</span>
+                            <span className="guide-control-badge">{c.name}</span>
                           </td>
                           <td>
                             <span className="guide-control-type">{c.type}</span>
@@ -346,23 +367,28 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               </div>
 
               <div className="guide-example-box">
-                <div className="guide-example-title">Input Examples</div>
-                <div className="guide-code-block">
-                  {activeGuide.inputAndOutputExamples.inputExamples.join("\n")}
-                </div>
-
-                <div className="guide-example-title" style={{ marginTop: 14 }}>Output Examples</div>
-                <div className="guide-code-block" style={{ color: "#86efac" }}>
-                  {activeGuide.inputAndOutputExamples.outputExamples.join("\n")}
-                </div>
-
-                {activeGuide.inputAndOutputExamples.structureSample && (
+                {activeGuide.examples?.inputExample && (
                   <>
-                    <div className="guide-example-title" style={{ marginTop: 14 }}>Sample Structure / Layout</div>
-                    <div className="guide-code-block" style={{ color: "#fcd34d" }}>
-                      {activeGuide.inputAndOutputExamples.structureSample}
+                    <div className="guide-example-title">Input Example</div>
+                    <div className="guide-code-block">
+                      {activeGuide.examples.inputExample}
                     </div>
                   </>
+                )}
+
+                {activeGuide.examples?.outputExample && (
+                  <>
+                    <div className="guide-example-title" style={{ marginTop: 14 }}>Output Example</div>
+                    <div className="guide-code-block" style={{ color: "#86efac" }}>
+                      {activeGuide.examples.outputExample}
+                    </div>
+                  </>
+                )}
+
+                {activeGuide.examples?.explanation && (
+                  <div style={{ marginTop: 12, fontSize: 12.5, color: "#94a3b8", lineHeight: 1.5 }}>
+                    <strong>Note: </strong> {activeGuide.examples.explanation}
+                  </div>
                 )}
               </div>
             </section>
@@ -382,10 +408,10 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                     <div key={i} className="guide-trouble-card">
                       <div className="guide-trouble-issue">
                         <AlertTriangle size={15} color="#ef4444" />
-                        <span>{t.problem}</span>
+                        <span>{t.issue}</span>
                       </div>
                       <div className="guide-trouble-cause">
-                        <strong>Probable Cause:</strong> {t.probableCause}
+                        <strong>Probable Cause:</strong> {t.cause}
                       </div>
                       <div className="guide-trouble-solution">
                         <strong>Fix:</strong> {t.solution}
@@ -405,33 +431,28 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
 
               <div className="guide-mini-card">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  {activeGuide.offlineRequirements.worksOffline ? (
+                  {activeGuide.offlineAndRequirements?.worksOffline ? (
                     <CheckCircle2 size={18} color="#10b981" />
                   ) : (
                     <AlertTriangle size={18} color="#f59e0b" />
                   )}
-                  <strong style={{ fontSize: 14, color: activeGuide.offlineRequirements.worksOffline ? "#34d399" : "#fbbf24", margin: 0 }}>
-                    {activeGuide.offlineRequirements.worksOffline
+                  <strong style={{ fontSize: 14, color: activeGuide.offlineAndRequirements?.worksOffline ? "#34d399" : "#fbbf24", margin: 0 }}>
+                    {activeGuide.offlineAndRequirements?.worksOffline
                       ? "Fully Offline Capable"
                       : "Hybrid / Requires Local Backend Server"}
                   </strong>
                 </div>
 
                 <p style={{ color: "#cbd5e1", marginBottom: 10 }}>
-                  {activeGuide.offlineRequirements.offlineDescription}
+                  {activeGuide.offlineAndRequirements?.internetDetails || "Processes locally on your device."}
                 </p>
 
                 <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                  <strong>Processing Engine: </strong>
-                  <span style={{ color: "#38bdf8" }}>{activeGuide.offlineRequirements.localEngineUsed}</span>
+                  <strong>Local Engine: </strong>
+                  <span style={{ color: "#38bdf8" }}>
+                    {activeGuide.offlineAndRequirements?.localProcessing ? "Browser Wasm / Native Engine (Local)" : "Local Server API"}
+                  </span>
                 </div>
-
-                {activeGuide.offlineRequirements.requiresInternetFor && (
-                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
-                    <strong>Internet Required For: </strong>
-                    <span style={{ color: "#fbbf24" }}>{activeGuide.offlineRequirements.requiresInternetFor}</span>
-                  </div>
-                )}
               </div>
             </section>
           </main>

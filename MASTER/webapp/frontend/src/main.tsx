@@ -169,8 +169,43 @@ function App(){
  function picker(label,accept,multiple,files,onChange,hint){return <label className="dropzone"><input type="file" accept={accept} multiple={multiple} onChange={e=>onChange(Array.from(e.target.files||[]))}/><span className="upload-icon"><Upload size={20}/></span><strong>{label}</strong><span className="muted">{files.length?files.map(f=>f.name).join(" · "):"Click to browse your device"}</span><small>{hint}</small></label>}
  function field(label,child){return <label className="field"><span>{label}</span>{child}</label>}
  async function run(path,data,filename){setBusy(true);setNotice(null);try{const res=await fetch(path,{method:"POST",body:data});if(!res.ok){let msg="Request failed ("+res.status+")";try{msg=(await res.json()).detail||msg}catch{}throw Error(msg)}const blob=await res.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);setNotice({type:"success",text:"Finished. Your ZIP download has started."})}catch(e){setNotice({type:"error",text:e.message||"Request failed"})}finally{setBusy(false)}}
- function convert(e){e.preventDefault();if(!images.length)return setNotice({type:"error",text:"Choose at least one image."});if(Boolean(width)!==Boolean(height))return setNotice({type:"error",text:"Enter both resize dimensions or leave both empty."});const d=new FormData();images.forEach(f=>d.append("files",f));d.append("output_format",format);d.append("quality",String(quality));if(width&&height){d.append("width",width);d.append("height",height)}run("/api/convert",d,"converted_images.zip")}
- function organize(e){e.preventDefault();if(!excel[0]||!archive[0])return setNotice({type:"error",text:"Choose an Excel workbook and an images ZIP archive."});const d=new FormData();d.append("excel",excel[0]);d.append("image_archive",archive[0]);d.append("mode",mode);run("/api/organize",d,"organized_images.zip")}
+ async function convert(e: any){
+    e.preventDefault();
+    if(!images.length) return setNotice({type:"error",text:"Choose at least one image."});
+    if(Boolean(width)!==Boolean(height)) return setNotice({type:"error",text:"Enter both resize dimensions or leave both empty."});
+    setBusy(true);
+    setNotice(null);
+    try {
+      const zipBlob = await convertImagesLocally(
+        images,
+        format,
+        quality,
+        width ? parseInt(width, 10) : undefined,
+        height ? parseInt(height, 10) : undefined
+      );
+      saveAs(zipBlob, "converted_images.zip");
+      setNotice({type:"success", text:`Finished! Converted ${images.length} image(s) to ${format.toUpperCase()}. ZIP download started.`});
+    } catch(err: any) {
+      setNotice({type:"error", text: err.message || "Failed to convert images."});
+    } finally {
+      setBusy(false);
+    }
+  }
+ async function organize(e: any){
+    e.preventDefault();
+    if(!excel[0]||!archive[0]) return setNotice({type:"error",text:"Choose an Excel workbook and an images ZIP archive."});
+    setBusy(true);
+    setNotice(null);
+    try {
+      const zipBlob = await organizeImagesLocally(excel[0], archive[0], mode);
+      saveAs(zipBlob, "organized_images.zip");
+      setNotice({type:"success", text:"Finished! Your organized images ZIP has been generated and download started."});
+    } catch(err: any) {
+      setNotice({type:"error", text: err.message || "Failed to organize images."});
+    } finally {
+      setBusy(false);
+    }
+  }
  function exportPpt(e){e.preventDefault();if(!ppts.length)return setNotice({type:"error",text:"Choose at least one PowerPoint file."});const d=new FormData();ppts.forEach(f=>d.append("files",f));d.append("export_jpg",String(jpg));d.append("export_png",String(png));d.append("export_webp",String(webp));d.append("quality",String(pq));run("/api/ppt-export",d,"powerpoint_exports.zip")}
  function nav(id){setPage(id);setMobile(false);setNotice(null)}
  return <div className="app-shell">{mobile&&<button className="scrim" onClick={()=>setMobile(false)}/>}<aside className={"sidebar "+(mobile?"open":"")}><div className="brand"><div className="brand-mark">L<span>.</span></div><div><strong>LOVENEET</strong><small>BUSINESS SUITE</small></div><button className="mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div><div className="nav-label">WORKSPACE</div><nav>{tools.map(t=><button key={t.id} className={"nav-item "+(page===t.id?"active":"")} onClick={()=>nav(t.id)}><t.icon size={18}/><span>{t.name}</span></button>)}</nav><div className="sidebar-bottom"><div className="secure-note"><Sparkles size={16}/><div><strong>Made for your workflow</strong><small>Web edition · local server</small></div></div><button className="nav-item" onClick={()=>setShowGuideModal(true)}><BookOpen size={18}/><span>How to Use (Guide)</span></button>
