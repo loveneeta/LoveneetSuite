@@ -222,8 +222,8 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
       },
       {
         stepNumber: 6,
-        title: "Convert and Download Batch ZIP",
-        instruction: "Click 'Convert & Download ZIP'. The progress bar tracks conversion in real time and downloads 'converted_images.zip' upon completion."
+        title: "Convert and Download",
+        instruction: "Click 'Convert & Download'. If 1 or 2 files are converted, they are downloaded directly to your device without a ZIP archive; if more than 2 files are converted, they are automatically packaged into 'converted_images.zip'."
       }
     ],
     controlsReference: [
@@ -238,7 +238,7 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
       { name: "Aspect Ratio Lock", type: "Toggle", purpose: "Locks proportion so changing width auto-updates height.", whenToUse: "Prevents image distortion and stretching." },
       { name: "1:1 Zoom", type: "Toggle", purpose: "Enlarges preview to actual pixel scale for fine texture inspection.", whenToUse: "Before finalizing batch export." },
       { name: "Save this image", type: "Button", purpose: "Immediately downloads the currently inspected image.", whenToUse: "For single-file quick conversions." },
-      { name: "Convert & Download ZIP", type: "Button", purpose: "Batch processes all queued images and downloads converted_images.zip.", whenToUse: "Final step." }
+      { name: "Convert & Download", type: "Button", purpose: "Downloads 1-2 images directly, or packages >2 images into converted_images.zip.", whenToUse: "Final step." }
     ],
     examples: {
       inputExample: "ProductPhoto.png (4.8 MB, 2400 × 1600 px)",

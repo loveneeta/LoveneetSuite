@@ -1057,6 +1057,7 @@ export default function FileCollectorTool() {
     setCollectionDone(false);
     try {
       const zip = new JSZip();
+      const collectedList: { filename: string; blob: Blob }[] = [];
       let count = 0;
       let origBytes = 0;
       let finalBytes = 0;
@@ -1089,6 +1090,7 @@ export default function FileCollectorTool() {
 
           finalBytes += blobToSave.size;
           zip.file(item.target_filename, blobToSave);
+          collectedList.push({ filename: item.target_filename, blob: blobToSave });
           count++;
           setCollectProgress({
             copied: count,
@@ -1101,8 +1103,15 @@ export default function FileCollectorTool() {
         }
       }
 
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      saveAs(zipBlob, "Collected_Files.zip");
+      if (collectedList.length === 1) {
+        saveAs(collectedList[0].blob, collectedList[0].filename);
+      } else if (collectedList.length === 2) {
+        saveAs(collectedList[0].blob, collectedList[0].filename);
+        setTimeout(() => saveAs(collectedList[1].blob, collectedList[1].filename), 350);
+      } else {
+        const zipBlob = await zip.generateAsync({ type: "blob" });
+        saveAs(zipBlob, "Collected_Files.zip");
+      }
 
       if (enableCompression) {
         setCompressionStats({
@@ -1122,7 +1131,11 @@ export default function FileCollectorTool() {
       setCollectionDone(true);
       setAlertNotice({
         type: "success",
-        text: `Successfully collected ${count} file(s) into "Collected_Files.zip"!`
+        text: collectedList.length === 1
+          ? `Successfully collected "${collectedList[0].filename}". Downloaded directly!`
+          : collectedList.length === 2
+          ? `Successfully collected 2 files. Both downloaded directly!`
+          : `Successfully collected ${count} file(s) into "Collected_Files.zip"!`
       });
     } catch (err: any) {
       setAlertNotice({

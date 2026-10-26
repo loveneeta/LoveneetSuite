@@ -242,16 +242,35 @@ export default function ImageConverterTool() {
         (p) => setProgress(p)
       );
 
-      saveAs(zipBlob, "converted_images.zip");
-
       const totalOrig = results.reduce((sum, r) => sum + r.originalSize, 0);
       const totalComp = results.reduce((sum, r) => sum + r.compressedSize, 0);
       const savedPct = totalOrig > 0 ? Math.max(0, Math.round(((totalOrig - totalComp) / totalOrig) * 100)) : 0;
 
-      setStatusMessage({
-        type: "success",
-        text: `Success! Converted ${results.length} images to ${outputFormat.toUpperCase()}. Reduced total size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). ZIP download started.`
-      });
+      if (results.length === 1) {
+        // Single file: download directly without ZIP
+        saveAs(results[0].blob, results[0].targetFilename);
+        setStatusMessage({
+          type: "success",
+          text: `Success! Converted "${results[0].targetFilename}". Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded directly.`
+        });
+      } else if (results.length === 2) {
+        // 2 files: download both directly without ZIP
+        saveAs(results[0].blob, results[0].targetFilename);
+        setTimeout(() => {
+          saveAs(results[1].blob, results[1].targetFilename);
+        }, 350);
+        setStatusMessage({
+          type: "success",
+          text: `Success! Converted 2 images ("${results[0].targetFilename}", "${results[1].targetFilename}"). Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Both downloaded directly.`
+        });
+      } else {
+        // More than 2 files: package into ZIP
+        saveAs(zipBlob, "converted_images.zip");
+        setStatusMessage({
+          type: "success",
+          text: `Success! Converted ${results.length} images to ${outputFormat.toUpperCase()}. Reduced total size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded as converted_images.zip.`
+        });
+      }
     } catch (err: any) {
       setStatusMessage({
         type: "error",
@@ -839,7 +858,13 @@ export default function ImageConverterTool() {
             onClick={handleBatchConvert}
           >
             <Download size={16} />
-            <span>Convert & Download ZIP</span>
+            <span>
+              {files.length <= 1
+                ? "Convert & Download Image"
+                : files.length === 2
+                ? "Convert & Download Images (2 files)"
+                : "Convert & Download ZIP"}
+            </span>
           </button>
         )}
       </div>
