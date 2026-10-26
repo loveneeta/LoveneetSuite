@@ -2,11 +2,9 @@ import React, { useState, useMemo, useRef } from "react";
 import {
   FolderSync,
   FolderSearch,
-  FolderCheck,
   FolderOpen,
   FolderTree,
   Upload,
-  Download,
   CheckCircle2,
   AlertCircle,
   AlertTriangle,
@@ -16,13 +14,16 @@ import {
   Search,
   X,
   ShieldCheck,
-  ExternalLink,
   Layers,
   Sparkles,
   RefreshCw,
-  Eye,
   FileCheck2,
-  FileSpreadsheet
+  Sliders,
+  Maximize2,
+  Percent,
+  Minimize2,
+  Zap,
+  HardDrive
 } from "lucide-react";
 import JSZip from "jszip";
 import "./file-collector.css";
@@ -52,14 +53,29 @@ interface ScannedFileItem {
   target_filename: string;
   size: number;
   status: "eligible" | "duplicate_renamed" | "duplicate_skipped" | "overwrite";
+  is_image?: boolean;
+  image_format?: string | null;
   fileBlob?: File;
+}
+
+interface CompressionStats {
+  enabled: boolean;
+  total_images: number;
+  compressed: number;
+  skipped: number;
+  unsupported: number;
+  non_images: number;
+  orig_bytes: number;
+  final_bytes: number;
+  saved_bytes: number;
+  saved_pct: number;
 }
 
 export default function FileCollectorTool() {
   // Mode: "desktop" (FastAPI local filesystem) or "browser" (HTML5 webkitdirectory / JSZip)
   const [activeTab, setActiveTab] = useState<"desktop" | "browser">("desktop");
 
-  // Inputs
+  // Input & Output Folder Paths
   const [inputFolder, setInputFolder] = useState<string>("");
   const [outputFolder, setOutputFolder] = useState<string>("");
   const [includeSubfolders, setIncludeSubfolders] = useState<boolean>(true);
@@ -67,14 +83,29 @@ export default function FileCollectorTool() {
   const [prefixSubfolders, setPrefixSubfolders] = useState<boolean>(true);
   const [duplicateMode, setDuplicateMode] = useState<"rename" | "skip" | "overwrite">("rename");
 
-  // Scanned State
+  // Bulk Image Compression Settings
+  const [enableCompression, setEnableCompression] = useState<boolean>(false);
+  const [compressionMode, setCompressionMode] = useState<"reduce" | "target" | "resize">("reduce");
+  const [targetSize, setTargetSize] = useState<number>(200);
+  const [targetUnit, setTargetUnit] = useState<"KB" | "MB">("KB");
+  const [quality, setQuality] = useState<number>(80);
+  const [resizeMode, setResizeMode] = useState<"original" | "custom" | "scale">("original");
+  const [maxWidth, setMaxWidth] = useState<string>("");
+  const [maxHeight, setMaxHeight] = useState<string>("");
+  const [scalePct, setScalePct] = useState<number>(100);
+  const [outputFormat, setOutputFormat] = useState<"original" | "jpg" | "png" | "webp">("original");
+  const [preserveAspect, setPreserveAspect] = useState<boolean>(true);
+  const [skipBelowTarget, setSkipBelowTarget] = useState<boolean>(true);
+
+  // Scanned Files State
   const [scannedFiles, setScannedFiles] = useState<ScannedFileItem[]>([]);
   const [totalFound, setTotalFound] = useState<number>(0);
+  const [totalImages, setTotalImages] = useState<number>(0);
   const [totalDuplicates, setTotalDuplicates] = useState<number>(0);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [searchFilter, setSearchFilter] = useState<string>("");
 
-  // Collection State
+  // Collection & Compression Execution State
   const [isCollecting, setIsCollecting] = useState<boolean>(false);
   const [collectProgress, setCollectProgress] = useState<{
     copied: number;
@@ -87,21 +118,22 @@ export default function FileCollectorTool() {
   const [collectionDone, setCollectionDone] = useState<boolean>(false);
   const [collectionErrors, setCollectionErrors] = useState<Array<{ file: string; error: string }>>([]);
   const [lastOutputFolder, setLastOutputFolder] = useState<string>("");
+  const [compressionStats, setCompressionStats] = useState<CompressionStats | null>(null);
 
-  // Status message
+  // Status Alerts
   const [alertNotice, setAlertNotice] = useState<{
     type: "success" | "error" | "info";
     text: string;
   } | null>(null);
 
-  // Overwrite confirmation modal
+  // Overwrite Confirmation Modal
   const [showOverwriteModal, setShowOverwriteModal] = useState<boolean>(false);
 
-  // Browser mode uploaded files
+  // Browser Mode Files
   const [browserFiles, setBrowserFiles] = useState<File[]>([]);
   const cancelRequestedRef = useRef<boolean>(false);
 
-  // Helper to suggest output directory when input changes
+  // Helper to suggest default output directory
   const handleInputChange = (val: string) => {
     setInputFolder(val);
     if (!outputFolder || outputFolder.endsWith("Collected_Files")) {
@@ -115,6 +147,7 @@ export default function FileCollectorTool() {
     }
     setScannedFiles([]);
     setTotalFound(0);
+    setTotalImages(0);
     setCollectionDone(false);
   };
 
@@ -127,7 +160,7 @@ export default function FileCollectorTool() {
           handleInputChange(dirHandle.name);
           setAlertNotice({
             type: "info",
-            text: `Selected folder: "${dirHandle.name}". If running with the local backend, you can also paste the full local path (e.g. C:\\Users\\...\\${dirHandle.name}).`
+            text: `Selected folder: "${dirHandle.name}". If running with the local server, you can also paste the full local path (e.g. C:\\Users\\...\\${dirHandle.name}).`
           });
         } else {
           setOutputFolder(dirHandle.name);
@@ -143,7 +176,22 @@ export default function FileCollectorTool() {
     }
   };
 
-  // Scan files via local backend API
+  // Build compression configuration payload
+  const getCompressionPayload = () => ({
+    mode: compressionMode,
+    target_size: targetSize,
+    target_unit: targetUnit,
+    quality: quality,
+    resize_mode: resizeMode,
+    max_width: maxWidth ? parseInt(maxWidth, 10) : null,
+    max_height: maxHeight ? parseInt(maxHeight, 10) : null,
+    scale_pct: scalePct,
+    preserve_aspect: preserveAspect,
+    output_format: outputFormat,
+    skip_below_target: skipBelowTarget
+  });
+
+  // Scan files via backend API
   const handleScanDesktop = async () => {
     if (!inputFolder.trim()) {
       setAlertNotice({ type: "error", text: "Please enter or select an input folder path." });
@@ -163,7 +211,9 @@ export default function FileCollectorTool() {
           include_subfolders: includeSubfolders,
           include_hidden: includeHidden,
           prefix_subfolders: prefixSubfolders,
-          duplicate_mode: duplicateMode
+          duplicate_mode: duplicateMode,
+          enable_compression: enableCompression,
+          compression: getCompressionPayload()
         })
       });
 
@@ -179,13 +229,14 @@ export default function FileCollectorTool() {
       const data = await res.json();
       setScannedFiles(data.files || []);
       setTotalFound(data.total_found || 0);
+      setTotalImages(data.total_images || 0);
       setTotalDuplicates(data.total_duplicates || 0);
       if (data.output_folder) {
         setOutputFolder(data.output_folder);
       }
       setAlertNotice({
         type: "success",
-        text: `Scan complete: Found ${data.total_found} file(s) across subfolders. Ready to collect.`
+        text: `Scan complete: Found ${data.total_found} file(s) (${data.total_images} images, ${data.total_non_images} other files). Ready to collect.`
       });
     } catch (err: any) {
       setAlertNotice({
@@ -197,7 +248,7 @@ export default function FileCollectorTool() {
     }
   };
 
-  // Execute collection via local backend
+  // Start Collection with optional Overwrite confirmation
   const handleStartCollection = async () => {
     if (duplicateMode === "overwrite") {
       setShowOverwriteModal(true);
@@ -217,13 +268,14 @@ export default function FileCollectorTool() {
     cancelRequestedRef.current = false;
     setCollectionDone(false);
     setCollectionErrors([]);
+    setCompressionStats(null);
     setCollectProgress({
       copied: 0,
       skipped: 0,
       failed: 0,
       total: totalFound || scannedFiles.length || 1,
-      currentFile: "Starting collection...",
-      percent: 10
+      currentFile: enableCompression ? "Scanning & compressing images..." : "Collecting files...",
+      percent: 15
     });
 
     try {
@@ -237,7 +289,9 @@ export default function FileCollectorTool() {
           include_subfolders: includeSubfolders,
           include_hidden: includeHidden,
           prefix_subfolders: prefixSubfolders,
-          duplicate_mode: duplicateMode
+          duplicate_mode: duplicateMode,
+          enable_compression: enableCompression,
+          compression: getCompressionPayload()
         })
       });
 
@@ -261,10 +315,13 @@ export default function FileCollectorTool() {
       });
       setCollectionErrors(data.errors || []);
       setLastOutputFolder(data.output_folder || targetOut);
+      if (data.compression) {
+        setCompressionStats(data.compression);
+      }
       setCollectionDone(true);
       setAlertNotice({
         type: "success",
-        text: `Collection finished! ${data.copied} file(s) copied safely into "${data.output_folder}".`
+        text: `Collection finished! ${data.copied} file(s) collected safely into "${data.output_folder}".`
       });
     } catch (err: any) {
       setAlertNotice({
@@ -297,7 +354,7 @@ export default function FileCollectorTool() {
     } catch (err: any) {
       setAlertNotice({
         type: "info",
-        text: `Output directory: ${target}. (Note: opening in Explorer is only supported when running the local backend server).`
+        text: `Output directory: ${target}. (Note: opening in Explorer is supported when running the local backend server).`
       });
     }
   };
@@ -306,23 +363,40 @@ export default function FileCollectorTool() {
   const handleExportReport = () => {
     const lines = [
       "==================================================",
-      "Loveneet Suite — File Collector Processing Report",
+      "Loveneet Suite — File Collector & Compression Report",
       `Date: ${new Date().toLocaleString()}`,
       `Input Folder: ${inputFolder}`,
       `Output Folder: ${lastOutputFolder || outputFolder}`,
       `Prefix with Subfolders: ${prefixSubfolders ? "Enabled" : "Disabled"}`,
       `Duplicate Handling: ${duplicateMode}`,
+      `Image Compression: ${enableCompression ? "ENABLED" : "Disabled"}`,
       "==================================================",
-      "",
-      `Total Found: ${totalFound}`,
-      `Successfully Copied: ${collectProgress.copied}`,
-      `Duplicates Skipped: ${collectProgress.skipped}`,
-      `Failed Operations: ${collectProgress.failed}`,
       ""
     ];
 
+    if (enableCompression && compressionStats) {
+      lines.push("--- COMPRESSION DASHBOARD METRICS ---");
+      lines.push(`Total Images Processed: ${compressionStats.total_images}`);
+      lines.push(`Images Compressed: ${compressionStats.compressed}`);
+      lines.push(`Images Skipped (Below Target): ${compressionStats.skipped}`);
+      lines.push(`Unsupported or Failed Images: ${compressionStats.unsupported}`);
+      lines.push(`Non-Image Files Copied: ${compressionStats.non_images}`);
+      lines.push(`Original Total Size: ${formatBytes(compressionStats.orig_bytes)}`);
+      lines.push(`Compressed Total Size: ${formatBytes(compressionStats.final_bytes)}`);
+      lines.push(
+        `Space Saved: ${formatBytes(compressionStats.saved_bytes)} (${compressionStats.saved_pct}%)`
+      );
+      lines.push("");
+    } else {
+      lines.push(`Total Found: ${totalFound}`);
+      lines.push(`Successfully Copied: ${collectProgress.copied}`);
+      lines.push(`Duplicates Skipped: ${collectProgress.skipped}`);
+      lines.push(`Failed Operations: ${collectProgress.failed}`);
+      lines.push("");
+    }
+
     if (collectionErrors.length > 0) {
-      lines.push("--- FAILURES & WARNINGS ---");
+      lines.push("--- ERRORS & WARNINGS ---");
       collectionErrors.forEach((e, idx) => {
         lines.push(`${idx + 1}. File: ${e.file}`);
         lines.push(`   Error: ${e.error}`);
@@ -333,12 +407,14 @@ export default function FileCollectorTool() {
     lines.push("--- SCANNED & PROCESSED FILES ---");
     scannedFiles.forEach((item, idx) => {
       lines.push(
-        `[${idx + 1}] ${item.relative_path} -> ${item.target_filename} (${item.status})`
+        `[${idx + 1}] ${item.relative_path} -> ${item.target_filename} (${item.status}${
+          item.is_image ? ", image" : ", document"
+        })`
       );
     });
 
     const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
-    saveAs(blob, "file_collector_report.txt");
+    saveAs(blob, "file_collector_compression_report.txt");
   };
 
   // Browser Mode (Dropzone / webkitdirectory)
@@ -347,21 +423,32 @@ export default function FileCollectorTool() {
     const allFiles = Array.from(filesList);
     setBrowserFiles(allFiles);
 
-    // Compute preview client-side using identical rules
     const usedNames = new Set<string>();
     const items: ScannedFileItem[] = [];
     let dups = 0;
+    let imgCount = 0;
+
+    const imgExts = new Set([
+      "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "ico", "avif"
+    ]);
 
     for (const f of allFiles) {
       const relPath = (f as any).webkitRelativePath || f.name;
       const parts = relPath.split("/").filter(Boolean);
 
-      // Check hidden
       const isHidden = parts.some((p: string) => p.startsWith("."));
       if (!includeHidden && isHidden) continue;
 
-      const filename = parts[parts.length - 1];
-      const subfolders = parts.slice(1, -1); // exclude root folder from prefix!
+      let filename = parts[parts.length - 1];
+      const subfolders = parts.slice(1, -1);
+      const ext = filename.lastIndexOf(".") !== -1 ? filename.substring(filename.lastIndexOf(".") + 1).toLowerCase() : "";
+      const isImg = imgExts.has(ext);
+      if (isImg) imgCount++;
+
+      if (enableCompression && isImg && outputFormat !== "original") {
+        const stem = filename.lastIndexOf(".") !== -1 ? filename.substring(0, filename.lastIndexOf(".")) : filename;
+        filename = `${stem}.${outputFormat}`;
+      }
 
       let baseName = filename;
       if (prefixSubfolders && subfolders.length > 0) {
@@ -369,7 +456,7 @@ export default function FileCollectorTool() {
       }
 
       const stem = baseName.lastIndexOf(".") !== -1 ? baseName.substring(0, baseName.lastIndexOf(".")) : baseName;
-      const ext = baseName.lastIndexOf(".") !== -1 ? baseName.substring(baseName.lastIndexOf(".")) : "";
+      const finalExt = baseName.lastIndexOf(".") !== -1 ? baseName.substring(baseName.lastIndexOf(".")) : "";
 
       const lower = baseName.toLowerCase();
       let targetName = baseName;
@@ -386,7 +473,7 @@ export default function FileCollectorTool() {
         } else {
           let i = 1;
           while (true) {
-            const cand = `${stem} (${i})${ext}`;
+            const cand = `${stem} (${i})${finalExt}`;
             if (!usedNames.has(cand.toLowerCase())) {
               usedNames.add(cand.toLowerCase());
               targetName = cand;
@@ -404,20 +491,22 @@ export default function FileCollectorTool() {
         target_filename: targetName,
         size: f.size,
         status,
+        is_image: isImg,
         fileBlob: f
       });
     }
 
     setScannedFiles(items);
     setTotalFound(items.length);
+    setTotalImages(imgCount);
     setTotalDuplicates(dups);
     setAlertNotice({
       type: "success",
-      text: `Loaded ${items.length} file(s) from selected folder. Ready to export.`
+      text: `Loaded ${items.length} file(s) (${imgCount} images). Ready to collect.`
     });
   };
 
-  // Browser Mode ZIP export
+  // Browser Mode ZIP export with optional client-side canvas compression
   const handleBrowserZipExport = async () => {
     if (!scannedFiles.length) return;
     setIsCollecting(true);
@@ -425,10 +514,66 @@ export default function FileCollectorTool() {
     try {
       const zip = new JSZip();
       let count = 0;
+      let origBytes = 0;
+      let finalBytes = 0;
+      let compCount = 0;
+
       for (const item of scannedFiles) {
         if (item.status === "duplicate_skipped") continue;
         if (item.fileBlob) {
-          zip.file(item.target_filename, item.fileBlob);
+          origBytes += item.fileBlob.size;
+          let blobToSave: Blob = item.fileBlob;
+
+          // If compression enabled and is image, try canvas compression
+          if (enableCompression && item.is_image) {
+            try {
+              const bmp = await createImageBitmap(item.fileBlob);
+              let w = bmp.width;
+              let h = bmp.height;
+
+              if (resizeMode === "scale" && scalePct < 100) {
+                w = Math.max(1, Math.floor(w * (scalePct / 100)));
+                h = Math.max(1, Math.floor(h * (scalePct / 100)));
+              } else if (resizeMode === "custom" && (maxWidth || maxHeight)) {
+                const mw = maxWidth ? parseInt(maxWidth, 10) : w;
+                const mh = maxHeight ? parseInt(maxHeight, 10) : h;
+                if (preserveAspect) {
+                  const ratio = Math.min(mw / w, mh / h);
+                  w = Math.max(1, Math.floor(w * ratio));
+                  h = Math.max(1, Math.floor(h * ratio));
+                } else {
+                  w = mw;
+                  h = mh;
+                }
+              }
+
+              const canvas = document.createElement("canvas");
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext("2d");
+              if (ctx) {
+                ctx.drawImage(bmp, 0, 0, w, h);
+                const mime =
+                  outputFormat === "png"
+                    ? "image/png"
+                    : outputFormat === "webp"
+                    ? "image/webp"
+                    : "image/jpeg";
+                const cBlob = await new Promise<Blob | null>((resolve) =>
+                  canvas.toBlob(resolve, mime, quality / 100)
+                );
+                if (cBlob && cBlob.size < item.fileBlob.size) {
+                  blobToSave = cBlob;
+                  compCount++;
+                }
+              }
+            } catch (cErr) {
+              // Fallback to original
+            }
+          }
+
+          finalBytes += blobToSave.size;
+          zip.file(item.target_filename, blobToSave);
           count++;
           setCollectProgress({
             copied: count,
@@ -441,8 +586,24 @@ export default function FileCollectorTool() {
         }
       }
 
-      const blob = await zip.generateAsync({ type: "blob" });
-      saveAs(blob, "Collected_Files.zip");
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      saveAs(zipBlob, "Collected_Files.zip");
+
+      if (enableCompression) {
+        setCompressionStats({
+          enabled: true,
+          total_images: totalImages,
+          compressed: compCount,
+          skipped: totalImages - compCount,
+          unsupported: 0,
+          non_images: scannedFiles.length - totalImages,
+          orig_bytes: origBytes,
+          final_bytes: finalBytes,
+          saved_bytes: Math.max(0, origBytes - finalBytes),
+          saved_pct: origBytes > 0 ? Math.round(((origBytes - finalBytes) / origBytes) * 100) : 0
+        });
+      }
+
       setCollectionDone(true);
       setAlertNotice({
         type: "success",
@@ -451,7 +612,7 @@ export default function FileCollectorTool() {
     } catch (err: any) {
       setAlertNotice({
         type: "error",
-        text: `Browser ZIP export failed: ${err.message}`
+        text: `Browser export failed: ${err.message}`
       });
     } finally {
       setIsCollecting(false);
@@ -471,19 +632,22 @@ export default function FileCollectorTool() {
 
   return (
     <div className="collector-tool">
-      {/* Feature Badges */}
+      {/* Top Feature Badges */}
       <div className="collector-badges">
         <span className="collector-badge">
-          <Copy size={13} /> Copy-Only (Safe)
+          <Copy size={13} /> Safe Copy-Only
         </span>
         <span className="collector-badge">
           <FolderTree size={13} /> Subfolder Prefixing
         </span>
         <span className="collector-badge">
-          <ShieldCheck size={13} /> Zero Overwrite Protection
+          <ShieldCheck size={13} /> Duplicate Protection
         </span>
         <span className="collector-badge">
-          <Layers size={13} /> Universal File Support
+          <Zap size={13} /> Bulk Image Compression
+        </span>
+        <span className="collector-badge">
+          <Layers size={13} /> Universal Format Engine
         </span>
       </div>
 
@@ -494,7 +658,7 @@ export default function FileCollectorTool() {
           <div>
             <h3>Folder & Collection Settings</h3>
             <p>
-              Select an input directory to scan. Files from all nested folders will be collected and flattened into the destination folder.
+              Recursively scan nested subfolders and flatten all files into a single destination folder. Originals are never modified or deleted.
             </p>
           </div>
         </div>
@@ -518,60 +682,56 @@ export default function FileCollectorTool() {
         </div>
 
         {activeTab === "desktop" ? (
-          <>
-            {/* Input & Output Inputs */}
-            <div className="collector-grid">
-              <div className="collector-field">
-                <label>
-                  <span>Input Folder</span>
-                  <small style={{ color: "#64748b" }}>Source directory</small>
-                </label>
-                <div className="collector-input-group">
-                  <input
-                    type="text"
-                    className="collector-input"
-                    placeholder="e.g. C:\Users\Username\Products"
-                    value={inputFolder}
-                    onChange={(e) => handleInputChange(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="collector-btn-secondary"
-                    onClick={() => handlePickDirectory("input")}
-                    title="Browse Folder"
-                  >
-                    <FolderOpen size={15} /> Browse
-                  </button>
-                </div>
-              </div>
-
-              <div className="collector-field">
-                <label>
-                  <span>Output Folder</span>
-                  <small style={{ color: "#64748b" }}>Defaults to Collected_Files</small>
-                </label>
-                <div className="collector-input-group">
-                  <input
-                    type="text"
-                    className="collector-input"
-                    placeholder="e.g. C:\Users\Username\Products\Collected_Files"
-                    value={outputFolder}
-                    onChange={(e) => setOutputFolder(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="collector-btn-secondary"
-                    onClick={() => handlePickDirectory("output")}
-                    title="Browse Destination"
-                  >
-                    <FolderOpen size={15} /> Browse
-                  </button>
-                </div>
+          <div className="collector-grid">
+            <div className="collector-field">
+              <label>
+                <span>Input Folder</span>
+                <small style={{ color: "#64748b" }}>Source directory</small>
+              </label>
+              <div className="collector-input-group">
+                <input
+                  type="text"
+                  className="collector-input"
+                  placeholder="e.g. C:\Users\Username\Products"
+                  value={inputFolder}
+                  onChange={(e) => handleInputChange(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="collector-btn-secondary"
+                  onClick={() => handlePickDirectory("input")}
+                  title="Browse Folder"
+                >
+                  <FolderOpen size={15} /> Browse
+                </button>
               </div>
             </div>
-          </>
+
+            <div className="collector-field">
+              <label>
+                <span>Output Folder</span>
+                <small style={{ color: "#64748b" }}>Defaults to Collected_Files</small>
+              </label>
+              <div className="collector-input-group">
+                <input
+                  type="text"
+                  className="collector-input"
+                  placeholder="e.g. C:\Users\Username\Products\Collected_Files"
+                  value={outputFolder}
+                  onChange={(e) => setOutputFolder(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="collector-btn-secondary"
+                  onClick={() => handlePickDirectory("output")}
+                  title="Browse Destination"
+                >
+                  <FolderOpen size={15} /> Browse
+                </button>
+              </div>
+            </div>
+          </div>
         ) : (
-          /* Browser Folder Dropzone */
           <div style={{ marginBottom: 18 }}>
             <label className="collector-dropzone">
               <input
@@ -620,7 +780,7 @@ export default function FileCollectorTool() {
             />
             <div className="collector-toggle-label">
               <strong>Prefix with Subfolder Names</strong>
-              <small>e.g. Chairs-Wooden-Chair01.abc</small>
+              <small>e.g. Chairs-Wooden-Chair01.jpg</small>
             </div>
           </label>
 
@@ -650,6 +810,255 @@ export default function FileCollectorTool() {
             </select>
           </div>
         </div>
+
+        {/* Image Compression Feature Toggle */}
+        <div style={{ marginTop: 8, marginBottom: 8 }}>
+          <label className="collector-toggle" style={{ display: "inline-flex" }}>
+            <input
+              type="checkbox"
+              checked={enableCompression}
+              onChange={(e) => setEnableCompression(e.target.checked)}
+            />
+            <div className="collector-toggle-label">
+              <strong style={{ fontSize: 13.5, color: enableCompression ? "#38bdf8" : "#f1f5f9" }}>
+                Enable Bulk Image Compression
+              </strong>
+              <small>
+                Compress JPG, PNG, WebP, HEIC/HEIF, BMP, GIF, TIFF while preserving documents unchanged
+              </small>
+            </div>
+          </label>
+        </div>
+
+        {/* Compression Settings Section (Shown when enabled) */}
+        {enableCompression && (
+          <div className="compression-box">
+            <div className="compression-box-head">
+              <div className="compression-box-title">
+                <Sliders size={18} color="#38bdf8" />
+                <div>
+                  <strong>Image Compression & Optimization Options</strong>
+                  <small>Customize target sizes, quality, dimensions, and formats</small>
+                </div>
+              </div>
+              <span className="collector-badge" style={{ borderColor: "#0284c7" }}>
+                Pillow & HEIF Engine
+              </span>
+            </div>
+
+            {/* Compression Modes */}
+            <div>
+              <label style={{ fontSize: 11.5, fontWeight: 700, color: "#cbd5e1", marginBottom: 6, display: "block" }}>
+                Compression Mode
+              </label>
+              <div className="compression-modes">
+                <label className={`compression-mode-card ${compressionMode === "reduce" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="comp-mode"
+                    value="reduce"
+                    checked={compressionMode === "reduce"}
+                    onChange={() => setCompressionMode("reduce")}
+                  />
+                  <div>
+                    <strong>1. Reduce File Size</strong>
+                    <small>Maximize size savings while retaining high visual fidelity</small>
+                  </div>
+                </label>
+
+                <label className={`compression-mode-card ${compressionMode === "target" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="comp-mode"
+                    value="target"
+                    checked={compressionMode === "target"}
+                    onChange={() => setCompressionMode("target")}
+                  />
+                  <div>
+                    <strong>2. Target Size Goal</strong>
+                    <small>Attempt to reach a target size (e.g. 200 KB) per image</small>
+                  </div>
+                </label>
+
+                <label className={`compression-mode-card ${compressionMode === "resize" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="comp-mode"
+                    value="resize"
+                    checked={compressionMode === "resize"}
+                    onChange={() => setCompressionMode("resize")}
+                  />
+                  <div>
+                    <strong>3. Resize + Compress</strong>
+                    <small>Downscale dimensions and apply optimization</small>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Detailed Controls Grid */}
+            <div className="compression-settings-grid">
+              {/* Target File Size (Active in Target mode or general) */}
+              <div className="collector-field">
+                <label>
+                  <span>Target File Size</span>
+                  <small style={{ color: "#64748b" }}>Goal size</small>
+                </label>
+                <div className="compression-input-row">
+                  <input
+                    type="number"
+                    min="10"
+                    max="50000"
+                    className="collector-input"
+                    value={targetSize}
+                    onChange={(e) => setTargetSize(Math.max(1, parseInt(e.target.value, 10) || 10))}
+                  />
+                  <select
+                    className="collector-select"
+                    value={targetUnit}
+                    onChange={(e) => setTargetUnit(e.target.value as any)}
+                  >
+                    <option value="KB">KB</option>
+                    <option value="MB">MB</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Quality Slider */}
+              <div className="collector-field">
+                <label>
+                  <span>Image Quality</span>
+                  <small style={{ color: "#64748b" }}>10% - 100%</small>
+                </label>
+                <div className="compression-slider-wrap">
+                  <input
+                    type="range"
+                    min="10"
+                    max="100"
+                    value={quality}
+                    onChange={(e) => setQuality(parseInt(e.target.value, 10))}
+                  />
+                  <strong>{quality}%</strong>
+                </div>
+              </div>
+
+              {/* Resize Mode Selector */}
+              <div className="collector-field">
+                <label>
+                  <span>Resize Dimensions</span>
+                  <small style={{ color: "#64748b" }}>Resolution control</small>
+                </label>
+                <select
+                  className="collector-select"
+                  value={resizeMode}
+                  onChange={(e) => setResizeMode(e.target.value as any)}
+                >
+                  <option value="original">Original Dimensions</option>
+                  <option value="scale">Percentage Scale (%)</option>
+                  <option value="custom">Custom Maximum Width/Height</option>
+                </select>
+              </div>
+
+              {/* Output Format */}
+              <div className="collector-field">
+                <label>
+                  <span>Output Format</span>
+                  <small style={{ color: "#64748b" }}>Where supported</small>
+                </label>
+                <select
+                  className="collector-select"
+                  value={outputFormat}
+                  onChange={(e) => setOutputFormat(e.target.value as any)}
+                >
+                  <option value="original">Keep Original Format</option>
+                  <option value="jpg">Convert to JPG (.jpg)</option>
+                  <option value="png">Convert to PNG (.png)</option>
+                  <option value="webp">Convert to WebP (.webp)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Conditional Resize Inputs */}
+            {resizeMode === "scale" && (
+              <div className="collector-field" style={{ maxWidth: 320 }}>
+                <label>
+                  <span>Scale Percentage</span>
+                  <small style={{ color: "#64748b" }}>e.g. 50% = half resolution</small>
+                </label>
+                <div className="compression-slider-wrap">
+                  <input
+                    type="range"
+                    min="10"
+                    max="100"
+                    value={scalePct}
+                    onChange={(e) => setScalePct(parseInt(e.target.value, 10))}
+                  />
+                  <strong>{scalePct}%</strong>
+                </div>
+              </div>
+            )}
+
+            {resizeMode === "custom" && (
+              <div className="compression-input-row" style={{ maxWidth: 360 }}>
+                <div className="collector-field" style={{ flex: 1 }}>
+                  <label>Max Width (px)</label>
+                  <input
+                    type="number"
+                    className="collector-input"
+                    placeholder="e.g. 1920"
+                    value={maxWidth}
+                    onChange={(e) => setMaxWidth(e.target.value)}
+                  />
+                </div>
+                <div className="collector-field" style={{ flex: 1 }}>
+                  <label>Max Height (px)</label>
+                  <input
+                    type="number"
+                    className="collector-input"
+                    placeholder="e.g. 1080"
+                    value={maxHeight}
+                    onChange={(e) => setMaxHeight(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Checkboxes Row */}
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", paddingTop: 4 }}>
+              <label className="collector-toggle">
+                <input
+                  type="checkbox"
+                  checked={preserveAspect}
+                  onChange={(e) => setPreserveAspect(e.target.checked)}
+                />
+                <div className="collector-toggle-label">
+                  <strong>Preserve Aspect Ratio</strong>
+                  <small>Never distort image proportions</small>
+                </div>
+              </label>
+
+              <label className="collector-toggle">
+                <input
+                  type="checkbox"
+                  checked={skipBelowTarget}
+                  onChange={(e) => setSkipBelowTarget(e.target.checked)}
+                />
+                <div className="collector-toggle-label">
+                  <strong>Skip Images Already Below Target</strong>
+                  <small>Avoid re-compressing small images</small>
+                </div>
+              </label>
+
+              <label className="collector-toggle">
+                <input type="checkbox" checked={true} readOnly disabled />
+                <div className="collector-toggle-label">
+                  <strong>Keep Originals (Safe Copy)</strong>
+                  <small>Source files are never modified</small>
+                </div>
+              </label>
+            </div>
+          </div>
+        )}
 
         {/* Action Controls */}
         <div className="collector-actions">
@@ -685,11 +1094,13 @@ export default function FileCollectorTool() {
             >
               {isCollecting ? (
                 <>
-                  <LoaderCircle className="spinner" size={16} /> Collecting Files…
+                  <LoaderCircle className="spinner" size={16} />{" "}
+                  {enableCompression ? "Collecting & Compressing…" : "Collecting Files…"}
                 </>
               ) : (
                 <>
-                  <Copy size={16} /> Start Collection
+                  <Copy size={16} />{" "}
+                  {enableCompression ? "Start Collection & Compression" : "Start Collection"}
                 </>
               )}
             </button>
@@ -701,7 +1112,7 @@ export default function FileCollectorTool() {
                 onClick={() => {
                   cancelRequestedRef.current = true;
                   setIsCollecting(false);
-                  setAlertNotice({ type: "info", text: "Collection cancelled by user." });
+                  setAlertNotice({ type: "info", text: "Operation cancelled by user." });
                 }}
               >
                 <X size={15} /> Cancel
@@ -709,13 +1120,13 @@ export default function FileCollectorTool() {
             )}
           </div>
 
-          {/* Quick Stats or Output Indicator */}
           {totalFound > 0 && (
             <div style={{ fontSize: 12.5, color: "#94a3b8" }}>
-              <strong style={{ color: "#f8fafc" }}>{totalFound}</strong> eligible files found
+              <strong style={{ color: "#f8fafc" }}>{totalFound}</strong> total files (
+              <span style={{ color: "#38bdf8" }}>{totalImages} images</span>)
               {totalDuplicates > 0 && (
                 <span style={{ color: "#fbbf24", marginLeft: 8 }}>
-                  ({totalDuplicates} duplicate names managed)
+                  · {totalDuplicates} duplicates auto-numbered
                 </span>
               )}
             </div>
@@ -742,13 +1153,21 @@ export default function FileCollectorTool() {
         </div>
       )}
 
-      {/* Collection Progress & Post-Collection Actions */}
+      {/* Progress & Post-Processing Panel */}
       {(isCollecting || collectionDone) && (
         <section className="collector-panel">
           <div className="collector-progress-wrap">
             <div className="collector-progress-info">
               <div>
-                <strong>{collectionDone ? "Collection Finished" : "Copying Files..."}</strong>
+                <strong>
+                  {collectionDone
+                    ? enableCompression
+                      ? "Collection & Compression Finished"
+                      : "Collection Finished"
+                    : enableCompression
+                    ? "Processing & Compressing Images..."
+                    : "Copying Files..."}
+                </strong>
                 <span style={{ marginLeft: 10, color: "#94a3b8", fontSize: 12 }}>
                   {collectProgress.currentFile}
                 </span>
@@ -765,7 +1184,7 @@ export default function FileCollectorTool() {
               />
             </div>
 
-            {/* Counters */}
+            {/* Standard KPI Counters */}
             <div className="collector-kpi-grid" style={{ marginTop: 8, marginBottom: 0 }}>
               <div className="collector-kpi-card kpi-blue">
                 <span>Total Files</span>
@@ -785,6 +1204,54 @@ export default function FileCollectorTool() {
               </div>
             </div>
 
+            {/* Dedicated Compression Dashboard */}
+            {enableCompression && compressionStats && (
+              <div className="compression-kpi-summary">
+                <div className="compression-savings-banner">
+                  <h4>
+                    <Zap size={18} color="#10b981" /> Compression Dashboard Summary
+                  </h4>
+                  <div className="compression-savings-badge">
+                    Space Saved: {formatBytes(compressionStats.saved_bytes)} ({compressionStats.saved_pct}%)
+                  </div>
+                </div>
+
+                <div className="collector-kpi-grid" style={{ marginBottom: 0 }}>
+                  <div className="collector-kpi-card">
+                    <span>Total Images</span>
+                    <strong>{compressionStats.total_images}</strong>
+                  </div>
+                  <div className="collector-kpi-card kpi-green">
+                    <span>Compressed</span>
+                    <strong>{compressionStats.compressed}</strong>
+                  </div>
+                  <div className="collector-kpi-card kpi-amber">
+                    <span>Skipped (&lt; Target)</span>
+                    <strong>{compressionStats.skipped}</strong>
+                  </div>
+                  <div className="collector-kpi-card kpi-rose">
+                    <span>Unsupported / Failed</span>
+                    <strong>{compressionStats.unsupported}</strong>
+                  </div>
+                  <div className="collector-kpi-card">
+                    <span>Documents Copied</span>
+                    <strong>{compressionStats.non_images}</strong>
+                  </div>
+                  <div className="collector-kpi-card">
+                    <span>Original Size</span>
+                    <strong style={{ fontSize: 18 }}>{formatBytes(compressionStats.orig_bytes)}</strong>
+                  </div>
+                  <div className="collector-kpi-card">
+                    <span>Compressed Size</span>
+                    <strong style={{ fontSize: 18, color: "#34d399" }}>
+                      {formatBytes(compressionStats.final_bytes)}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons Post-Completion */}
             {collectionDone && (
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
                 {activeTab === "desktop" && (
@@ -801,13 +1268,14 @@ export default function FileCollectorTool() {
                   className="collector-btn-secondary"
                   onClick={handleExportReport}
                 >
-                  <FileText size={16} /> Export Error / Processing Report
+                  <FileText size={16} /> Export Full Processing Report
                 </button>
                 <button
                   type="button"
                   className="collector-btn-secondary"
                   onClick={() => {
                     setCollectionDone(false);
+                    setCompressionStats(null);
                     setCollectProgress({ copied: 0, skipped: 0, failed: 0, total: 0, currentFile: "", percent: 0 });
                   }}
                 >
@@ -827,7 +1295,7 @@ export default function FileCollectorTool() {
             <div>
               <h3>Scanned Files Preview ({scannedFiles.length})</h3>
               <p>
-                Review source paths and how files will be named in the destination folder. Original files are never modified.
+                Review source paths and target output filenames. Images will be optimized according to your compression preferences.
               </p>
             </div>
           </div>
@@ -838,7 +1306,7 @@ export default function FileCollectorTool() {
                 <Search size={14} />
                 <input
                   type="text"
-                  placeholder="Filter scanned files..."
+                  placeholder="Filter scanned files by name or path..."
                   value={searchFilter}
                   onChange={(e) => setSearchFilter(e.target.value)}
                 />
@@ -862,6 +1330,7 @@ export default function FileCollectorTool() {
                 <thead>
                   <tr>
                     <th style={{ width: 110 }}>Status</th>
+                    <th style={{ width: 90 }}>Type</th>
                     <th>Source Relative Path</th>
                     <th>Target Output Filename</th>
                     <th style={{ width: 100, textAlign: "right" }}>Size</th>
@@ -882,6 +1351,17 @@ export default function FileCollectorTool() {
                         )}
                         {item.status === "overwrite" && (
                           <span className="collector-tag tag-overwrite">Overwrite</span>
+                        )}
+                      </td>
+                      <td>
+                        {item.is_image ? (
+                          <span className="collector-tag tag-renamed" style={{ fontSize: 10 }}>
+                            Image
+                          </span>
+                        ) : (
+                          <span className="collector-tag" style={{ background: "#1e293b", color: "#94a3b8", fontSize: 10 }}>
+                            File
+                          </span>
                         )}
                       </td>
                       <td style={{ color: "#94a3b8", fontFamily: "ui-monospace, monospace" }}>

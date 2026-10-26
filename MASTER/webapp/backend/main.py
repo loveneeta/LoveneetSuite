@@ -518,6 +518,27 @@ async def ppt_excel_export(payload: dict):
             raise HTTPException(500, "Generated workbook validation failed: " + str(exc)[:180])
         return StreamingResponse(io.BytesIO(out.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="PPT_to_Excel_with_Images.xlsx"'})
 
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+from PIL import ImageOps, ImageSequence
+
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
+    ".gif", ".heic", ".heif", ".avif", ".ico"
+}
+
+def is_supported_image(path: Path) -> tuple[bool, str | None]:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS or suffix in {".hicf"}:
+        try:
+            with Image.open(path) as img:
+                return True, img.format
+        except Exception:
+            return False, None
+    return False, None
 
 def is_file_or_dir_hidden(p: Path) -> bool:
     if p.name.startswith("."):
@@ -532,12 +553,15 @@ def is_file_or_dir_hidden(p: Path) -> bool:
             pass
     return False
 
-def get_collector_target_filename(rel_path: Path, prefix_subfolders: bool = True) -> str:
+def get_collector_target_filename(rel_path: Path, prefix_subfolders: bool = True, output_ext: str | None = None) -> str:
     parts = rel_path.parts
     if not parts:
         return ""
     filename = parts[-1]
     subfolders = parts[:-1]
+    if output_ext:
+        stem = Path(filename).stem
+        filename = f"{stem}{output_ext}"
     if prefix_subfolders and subfolders:
         return "-".join(subfolders) + "-" + filename
     return filename
@@ -577,6 +601,191 @@ def scan_collector_files(input_dir: Path, output_dir: Path, include_subfolders: 
     return found_files
 
 
+def compress_single_image(
+    src_path: Path,
+    dest_path: Path,
+    mode: str = "reduce",          # "reduce" | "target" | "resize"
+    target_bytes: int = 200 * 1024,
+    quality: int = 80,
+    resize_mode: str = "original", # "original" | "custom" | "scale"
+    max_width: int | None = None,
+    max_height: int | None = None,
+    scale_pct: int = 100,
+    preserve_aspect: bool = True,
+    output_fmt: str = "original",  # "original" | "jpg" | "png" | "webp"
+    skip_below_target: bool = True
+) -> dict:
+    orig_size = src_path.stat().st_size
+    if skip_below_target and target_bytes and orig_size <= target_bytes and mode == "target":
+        shutil.copy2(src_path, dest_path)
+        return {
+            "status": "skipped",
+            "reason": "already_below_target",
+            "orig_size": orig_size,
+            "final_size": orig_size,
+            "saved_bytes": 0
+        }
+
+    try:
+        with Image.open(src_path) as raw_img:
+            if getattr(raw_img, "is_animated", False) and raw_img.format == "GIF":
+                frames = [f.copy() for f in ImageSequence.Iterator(raw_img)]
+                with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                frames[0].save(
+                    tmp_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    optimize=True,
+                    duration=raw_img.info.get("duration", 100),
+                    loop=raw_img.info.get("loop", 0)
+                )
+                final_size = tmp_path.stat().st_size
+                if final_size < orig_size:
+                    shutil.move(tmp_path, dest_path)
+                else:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    shutil.copy2(src_path, dest_path)
+                    final_size = orig_size
+                return {
+                    "status": "compressed" if final_size < orig_size else "preserved",
+                    "orig_size": orig_size,
+                    "final_size": final_size,
+                    "saved_bytes": max(0, orig_size - final_size)
+                }
+
+            img = ImageOps.exif_transpose(raw_img)
+            icc_profile = raw_img.info.get("icc_profile")
+
+            fmt = output_fmt.lower()
+            if fmt == "original":
+                detected_fmt = (raw_img.format or "JPEG").upper()
+                if detected_fmt in {"JPEG", "JPG"}:
+                    save_format = "JPEG"
+                elif detected_fmt == "PNG":
+                    save_format = "PNG"
+                elif detected_fmt == "WEBP":
+                    save_format = "WEBP"
+                else:
+                    save_format = detected_fmt
+            elif fmt in {"jpg", "jpeg"}:
+                save_format = "JPEG"
+            elif fmt == "png":
+                save_format = "PNG"
+            elif fmt == "webp":
+                save_format = "WEBP"
+            else:
+                save_format = "JPEG"
+
+            w, h = img.size
+            new_w, new_h = w, h
+            if mode == "resize" or resize_mode != "original":
+                if resize_mode == "scale" and 1 <= scale_pct <= 100:
+                    new_w = max(1, int(w * scale_pct / 100))
+                    new_h = max(1, int(h * scale_pct / 100))
+                elif resize_mode == "custom" and (max_width or max_height):
+                    mw = max_width or w
+                    mh = max_height or h
+                    if preserve_aspect:
+                        ratio = min(mw / w, mh / h)
+                        new_w = max(1, int(w * ratio))
+                        new_h = max(1, int(h * ratio))
+                    else:
+                        new_w = mw
+                        new_h = mh
+
+            if (new_w, new_h) != (w, h):
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+            if save_format == "JPEG":
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                    rgba = img.convert("RGBA")
+                    bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                    bg.paste(rgba, mask=rgba.getchannel("A"))
+                    img = bg
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+            elif save_format == "PNG":
+                if img.mode not in ("RGBA", "RGB", "L", "LA", "P"):
+                    img = img.convert("RGBA")
+            elif save_format == "WEBP":
+                if img.mode not in ("RGBA", "RGB"):
+                    img = img.convert("RGBA" if "A" in img.mode else "RGB")
+
+            def encode_test(q: int, curr_img: Image.Image) -> bytes:
+                buf = io.BytesIO()
+                opts = {}
+                if icc_profile:
+                    opts["icc_profile"] = icc_profile
+                if save_format in {"JPEG", "WEBP"}:
+                    opts["quality"] = max(10, min(100, q))
+                    opts["optimize"] = True
+                elif save_format == "PNG":
+                    opts["optimize"] = True
+                    opts["compress_level"] = 9
+                try:
+                    curr_img.save(buf, format=save_format, **opts)
+                except Exception:
+                    curr_img.convert("RGB").save(buf, format="JPEG", quality=q, optimize=True)
+                return buf.getvalue()
+
+            best_data = None
+            if mode == "target" and target_bytes > 0:
+                low_q, high_q = 15, quality
+                best_data = encode_test(high_q, img)
+                if len(best_data) > target_bytes:
+                    for _ in range(5):
+                        mid_q = (low_q + high_q) // 2
+                        data = encode_test(mid_q, img)
+                        if len(data) <= target_bytes:
+                            best_data = data
+                            low_q = mid_q + 1
+                        else:
+                            high_q = mid_q - 1
+                            best_data = data
+                    curr_scale = 0.85
+                    while len(best_data) > target_bytes and curr_scale >= 0.4:
+                        dw = max(1, int(new_w * curr_scale))
+                        dh = max(1, int(new_h * curr_scale))
+                        scale_img = img.resize((dw, dh), Image.Resampling.LANCZOS)
+                        data = encode_test(max(20, quality - 20), scale_img)
+                        best_data = data
+                        if len(best_data) <= target_bytes:
+                            break
+                        curr_scale -= 0.15
+            else:
+                best_data = encode_test(quality, img)
+
+            if len(best_data) >= orig_size and save_format == (raw_img.format or "JPEG").upper():
+                shutil.copy2(src_path, dest_path)
+                final_size = orig_size
+                status = "preserved"
+            else:
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp.write(best_data)
+                    tmp_path = Path(tmp.name)
+                shutil.move(tmp_path, dest_path)
+                final_size = len(best_data)
+                status = "compressed"
+
+            return {
+                "status": status,
+                "orig_size": orig_size,
+                "final_size": final_size,
+                "saved_bytes": max(0, orig_size - final_size)
+            }
+    except Exception as exc:
+        shutil.copy2(src_path, dest_path)
+        return {
+            "status": "failed_or_unsupported",
+            "error": str(exc),
+            "orig_size": orig_size,
+            "final_size": orig_size,
+            "saved_bytes": 0
+        }
+
+
 @app.post("/api/collector/scan")
 async def collector_scan(payload: dict):
     input_folder = (payload.get("input_folder") or "").strip()
@@ -597,16 +806,29 @@ async def collector_scan(payload: dict):
     prefix_subfolders = payload.get("prefix_subfolders", True)
     duplicate_mode = payload.get("duplicate_mode", "rename")
 
+    enable_compression = payload.get("enable_compression", False)
+    comp_opts = payload.get("compression") or {}
+    output_format = (comp_opts.get("output_format") or "original").lower()
+
     found_files = scan_collector_files(input_path, output_path, include_subfolders, include_hidden)
 
     used_names = set()
     items = []
     total_duplicates = 0
+    total_images = 0
 
     for fp in found_files:
         try:
             rel = fp.relative_to(input_path)
-            base_name = get_collector_target_filename(rel, prefix_subfolders)
+            is_img, img_fmt = is_supported_image(fp)
+            if is_img:
+                total_images += 1
+
+            output_ext = None
+            if enable_compression and is_img and output_format != "original":
+                output_ext = f".{output_format}"
+
+            base_name = get_collector_target_filename(rel, prefix_subfolders, output_ext)
             stem = Path(base_name).stem
             ext = Path(base_name).suffix
 
@@ -643,7 +865,9 @@ async def collector_scan(payload: dict):
                 "relative_path": rel.as_posix(),
                 "target_filename": target_name,
                 "size": file_size,
-                "status": status
+                "status": status,
+                "is_image": is_img,
+                "image_format": img_fmt
             })
         except Exception:
             continue
@@ -653,6 +877,8 @@ async def collector_scan(payload: dict):
         "input_folder": str(input_path),
         "output_folder": str(output_path),
         "total_found": len(found_files),
+        "total_images": total_images,
+        "total_non_images": len(found_files) - total_images,
         "total_eligible": len([x for x in items if x["status"] != "duplicate_skipped"]),
         "total_duplicates": total_duplicates,
         "files": items
@@ -679,6 +905,21 @@ async def collector_collect(payload: dict):
     prefix_subfolders = payload.get("prefix_subfolders", True)
     duplicate_mode = payload.get("duplicate_mode", "rename")
 
+    enable_compression = payload.get("enable_compression", False)
+    comp_opts = payload.get("compression") or {}
+    comp_mode = comp_opts.get("mode", "reduce")
+    target_size_val = float(comp_opts.get("target_size", 200) or 200)
+    target_unit = (comp_opts.get("target_unit") or "KB").upper()
+    target_bytes = int(target_size_val * 1024 * 1024 if target_unit == "MB" else target_size_val * 1024)
+    quality = int(comp_opts.get("quality", 80) or 80)
+    resize_mode = comp_opts.get("resize_mode", "original")
+    max_width = int(comp_opts["max_width"]) if comp_opts.get("max_width") else None
+    max_height = int(comp_opts["max_height"]) if comp_opts.get("max_height") else None
+    scale_pct = int(comp_opts.get("scale_pct", 100) or 100)
+    preserve_aspect = comp_opts.get("preserve_aspect", True)
+    output_format = (comp_opts.get("output_format") or "original").lower()
+    skip_below_target = comp_opts.get("skip_below_target", True)
+
     try:
         output_path.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -692,10 +933,24 @@ async def collector_collect(payload: dict):
     failed_count = 0
     errors = []
 
+    images_compressed = 0
+    images_skipped = 0
+    images_unsupported = 0
+    non_images_count = 0
+    total_orig_bytes = 0
+    total_final_bytes = 0
+
     for fp in found_files:
         try:
             rel = fp.relative_to(input_path)
-            base_name = get_collector_target_filename(rel, prefix_subfolders)
+            is_img, _ = is_supported_image(fp)
+            is_image_ext = fp.suffix.lower() in IMAGE_EXTENSIONS or fp.suffix.lower() == ".hicf"
+
+            output_ext = None
+            if enable_compression and is_img and output_format != "original":
+                output_ext = f".{output_format}"
+
+            base_name = get_collector_target_filename(rel, prefix_subfolders, output_ext)
             stem = Path(base_name).stem
             ext = Path(base_name).suffix
 
@@ -729,7 +984,7 @@ async def collector_collect(payload: dict):
             except Exception:
                 pass
 
-            # Check if file already exists on disk from prior operations
+            # Existing file resolution
             if dest_file.exists():
                 if duplicate_mode == "skip":
                     skipped_count += 1
@@ -742,11 +997,57 @@ async def collector_collect(payload: dict):
                         i += 1
                     used_names.add(dest_file.name.casefold())
 
-            shutil.copy2(fp, dest_file)
-            copied_count += 1
+            fsize = fp.stat().st_size
+            total_orig_bytes += fsize
+
+            if enable_compression and is_img:
+                res = compress_single_image(
+                    src_path=fp,
+                    dest_path=dest_file,
+                    mode=comp_mode,
+                    target_bytes=target_bytes,
+                    quality=quality,
+                    resize_mode=resize_mode,
+                    max_width=max_width,
+                    max_height=max_height,
+                    scale_pct=scale_pct,
+                    preserve_aspect=preserve_aspect,
+                    output_fmt=output_format,
+                    skip_below_target=skip_below_target
+                )
+                total_final_bytes += res["final_size"]
+                if res["status"] == "compressed":
+                    images_compressed += 1
+                    copied_count += 1
+                elif res["status"] == "skipped":
+                    images_skipped += 1
+                    copied_count += 1
+                elif res["status"] == "failed_or_unsupported":
+                    images_unsupported += 1
+                    copied_count += 1
+                    errors.append({"file": str(fp), "error": res.get("error", "Unsupported image codec")})
+                else:
+                    copied_count += 1
+            elif enable_compression and is_image_ext and not is_img:
+                # File had image extension or .hicf, but could not be decoded
+                shutil.copy2(fp, dest_file)
+                copied_count += 1
+                total_final_bytes += fsize
+                images_unsupported += 1
+                errors.append({"file": str(fp), "error": "Unidentifiable image format or unsupported codec (preserved original)"})
+            else:
+                shutil.copy2(fp, dest_file)
+                copied_count += 1
+                total_final_bytes += fsize
+                if not is_img:
+                    non_images_count += 1
+
         except Exception as exc:
             failed_count += 1
             errors.append({"file": str(fp), "error": str(exc)})
+
+    saved_bytes = max(0, total_orig_bytes - total_final_bytes)
+    saved_pct = round((saved_bytes / total_orig_bytes * 100), 1) if total_orig_bytes > 0 else 0
 
     return {
         "ok": True,
@@ -756,6 +1057,18 @@ async def collector_collect(payload: dict):
         "copied": copied_count,
         "skipped": skipped_count,
         "failed": failed_count,
+        "compression": {
+            "enabled": enable_compression,
+            "total_images": images_compressed + images_skipped + images_unsupported,
+            "compressed": images_compressed,
+            "skipped": images_skipped,
+            "unsupported": images_unsupported,
+            "non_images": non_images_count,
+            "orig_bytes": total_orig_bytes,
+            "final_bytes": total_final_bytes,
+            "saved_bytes": saved_bytes,
+            "saved_pct": saved_pct
+        },
         "errors": errors
     }
 
@@ -781,4 +1094,3 @@ async def collector_open_folder(payload: dict):
         return {"ok": True, "message": f"Opened {folder}"}
     except Exception as exc:
         raise HTTPException(500, f"Could not open directory: {str(exc)}")
-
