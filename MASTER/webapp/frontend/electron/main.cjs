@@ -3,7 +3,7 @@
  * Secure, restricted renderer, offline-first execution, persistent SQLite database.
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { autoUpdater } = require("electron-updater");
@@ -226,6 +226,93 @@ function setupIpcHandlers() {
     return dbInstance.restore(srcPath);
   });
 
+  let isCollectorCancelled = false;
+
+// Native Image Compression Helper using Electron Skia Graphics Engine
+async function compressImageNative(srcPath, destPath, compressionOptions = {}) {
+  try {
+    const ext = path.extname(srcPath).toLowerCase();
+    const isPng = ext === ".png";
+    const isJpg = ext === ".jpg" || ext === ".jpeg";
+
+    const img = nativeImage.createFromPath(srcPath);
+    if (img.isEmpty()) {
+      await fs.promises.copyFile(srcPath, destPath);
+      const stat = await fs.promises.stat(destPath);
+      return { status: "fallback", origBytes: stat.size, finalBytes: stat.size };
+    }
+
+    const origStat = await fs.promises.stat(srcPath);
+    const origBytes = origStat.size;
+
+    const targetBytes = compressionOptions.targetBytes || (compressionOptions.targetSize ? (compressionOptions.targetUnit === "MB" ? compressionOptions.targetSize * 1048576 : compressionOptions.targetSize * 1024) : 0);
+    if (compressionOptions.skipBelowTarget && targetBytes > 0 && origBytes <= targetBytes) {
+      await fs.promises.copyFile(srcPath, destPath);
+      return { status: "skipped_below_target", origBytes, finalBytes: origBytes };
+    }
+
+    const origSize = img.getSize();
+    let targetWidth = origSize.width;
+    let targetHeight = origSize.height;
+
+    if (compressionOptions.resizeMode === "scale" && compressionOptions.scalePct && compressionOptions.scalePct < 100) {
+      const scale = compressionOptions.scalePct / 100;
+      targetWidth = Math.max(1, Math.round(origSize.width * scale));
+      targetHeight = Math.max(1, Math.round(origSize.height * scale));
+    } else if (compressionOptions.resizeMode === "custom" && (compressionOptions.maxWidth || compressionOptions.maxHeight)) {
+      const maxW = compressionOptions.maxWidth || origSize.width;
+      const maxH = compressionOptions.maxHeight || origSize.height;
+      if (compressionOptions.preserveAspect !== false) {
+        const ratio = Math.min(maxW / origSize.width, maxH / origSize.height, 1);
+        targetWidth = Math.max(1, Math.round(origSize.width * ratio));
+        targetHeight = Math.max(1, Math.round(origSize.height * ratio));
+      } else {
+        targetWidth = maxW;
+        targetHeight = maxH;
+      }
+    }
+
+    let processedImg = img;
+    if (targetWidth !== origSize.width || targetHeight !== origSize.height) {
+      processedImg = img.resize({ width: targetWidth, height: targetHeight, quality: "best" });
+    }
+
+    const outFmt = compressionOptions.outputFormat || "original";
+    const wantPng = outFmt === "png" || (outFmt === "original" && isPng);
+
+    let quality = compressionOptions.quality || 80;
+    let buffer;
+
+    if (wantPng) {
+      buffer = processedImg.toPNG();
+    } else {
+      buffer = processedImg.toJPEG(quality);
+      if (compressionOptions.mode === "target" && targetBytes > 0 && buffer.length > targetBytes) {
+        let q = quality;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          q = Math.max(15, q - 20);
+          const trial = processedImg.toJPEG(q);
+          if (trial) {
+            buffer = trial;
+            if (buffer.length <= targetBytes) break;
+          }
+        }
+      }
+    }
+
+    if (buffer && buffer.length < origBytes) {
+      await fs.promises.writeFile(destPath, buffer);
+      return { status: "compressed", origBytes, finalBytes: buffer.length };
+    } else {
+      await fs.promises.copyFile(srcPath, destPath);
+      return { status: "preserved", origBytes, finalBytes: origBytes };
+    }
+  } catch (err) {
+    await fs.promises.copyFile(srcPath, destPath);
+    return { status: "error", origBytes: 0, finalBytes: 0, error: err.message };
+  }
+}
+
   // Native Recursive File Collector Scan Engine
   ipcMain.handle("collector:scan", async (event, payload = {}) => {
     const input_folder = payload.input_folder || payload.inputFolder;
@@ -256,7 +343,9 @@ function setupIpcHandlers() {
         const fullPath = path.join(currentDir, entry.name);
 
         // Avoid scanning output folder into itself
-        if (path.resolve(fullPath) === outputPath) continue;
+        const fullNorm = path.resolve(fullPath).toLowerCase().replace(/[\\/]+$/, "");
+        const outNorm = outputPath.toLowerCase().replace(/[\\/]+$/, "");
+        if (fullNorm === outNorm || fullNorm.startsWith(outNorm + path.sep.toLowerCase())) continue;
 
         if (entry.isFile()) {
           foundFiles.push({
@@ -340,14 +429,23 @@ function setupIpcHandlers() {
     };
   });
 
-  // Native Safe Copy Collector Engine
+  // Collector Cancellation Handler
+  ipcMain.handle("collector:cancel", () => {
+    isCollectorCancelled = true;
+    return { ok: true };
+  });
+
+  // Native Safe Asynchronous Collector & Image Compressor Engine
   ipcMain.handle("collector:collect", async (event, payload = {}) => {
+    isCollectorCancelled = false;
     const input_folder = payload.input_folder || payload.inputFolder;
     const output_folder = payload.output_folder || payload.outputFolder;
     const include_subfolders = payload.include_subfolders !== undefined ? payload.include_subfolders : (payload.includeSubfolders !== undefined ? payload.includeSubfolders : true);
     const include_hidden = payload.include_hidden !== undefined ? payload.include_hidden : (payload.includeHidden !== undefined ? payload.includeHidden : false);
     const prefix_subfolders = payload.prefix_subfolders !== undefined ? payload.prefix_subfolders : (payload.prefixSubfolders !== undefined ? payload.prefixSubfolders : true);
     const duplicate_mode = payload.duplicate_mode || payload.duplicateMode || "rename";
+    const enable_compression = payload.enableCompression || payload.enable_compression || false;
+    const compression = payload.compression || {};
 
     if (!input_folder || !fs.existsSync(input_folder)) {
       throw new Error(`Input folder does not exist: ${input_folder}`);
@@ -357,84 +455,144 @@ function setupIpcHandlers() {
     const outputPath = output_folder
       ? path.resolve(output_folder)
       : path.join(inputPath, "Collected_Files");
+    const outNorm = outputPath.toLowerCase().replace(/[\/]+$/, "");
 
     if (!fs.existsSync(outputPath)) {
-      fs.mkdirSync(outputPath, { recursive: true });
+      await fs.promises.mkdir(outputPath, { recursive: true });
     }
 
-    // Reuse scan logic to compute candidate names
-    const scanData = await ipcMain.emit
-      ? null
-      : null; // will run below inline
+    const imgExts = new Set([
+      ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".ico", ".heic", ".heif", ".avif"
+    ]);
 
-    // Read and copy files safely
-    let copied = 0;
-    let skipped = 0;
-    let failed = 0;
-    const errors = [];
-    const usedNames = new Set();
-
-    function walkAndCopy(currentDir, currentPathParts) {
-      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    // Discover eligible files recursively and asynchronously
+    async function getEligibleFiles(currentDir, currentPathParts) {
+      const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+      const found = [];
       for (const entry of entries) {
         if (!include_hidden && entry.name.startsWith(".")) continue;
         const fullPath = path.join(currentDir, entry.name);
-        if (path.resolve(fullPath) === outputPath) continue;
+        const fullNorm = path.resolve(fullPath).toLowerCase().replace(/[\/]+$/, "");
+        if (fullNorm === outNorm || fullNorm.startsWith(outNorm + path.sep.toLowerCase())) continue;
 
         if (entry.isFile()) {
-          try {
-            let baseName = entry.name;
-            if (prefix_subfolders && currentPathParts.length > 0) {
-              baseName = `${currentPathParts.join("-")}-${entry.name}`;
-            }
-
-            const stem = path.basename(baseName, path.extname(baseName));
-            const fileExt = path.extname(baseName);
-            const lower = baseName.toLowerCase();
-            let targetName = baseName;
-
-            if (usedNames.has(lower)) {
-              if (duplicate_mode === "skip") {
-                skipped++;
-                continue;
-              } else if (duplicate_mode === "overwrite") {
-                targetName = baseName;
-              } else {
-                let i = 1;
-                while (true) {
-                  const cand = `${stem} (${i})${fileExt}`;
-                  if (!usedNames.has(cand.toLowerCase()) && !fs.existsSync(path.join(outputPath, cand))) {
-                    targetName = cand;
-                    break;
-                  }
-                  i++;
-                }
-              }
-            }
-            usedNames.add(targetName.toLowerCase());
-
-            const destPath = path.join(outputPath, targetName);
-            // Prevent copying onto itself
-            if (path.resolve(fullPath) === path.resolve(destPath)) {
-              skipped++;
-              continue;
-            }
-
-            fs.copyFileSync(fullPath, destPath);
-            copied++;
-          } catch (copyErr) {
-            failed++;
-            errors.push({ file: fullPath, error: copyErr.message });
-          }
+          const ext = path.extname(entry.name).toLowerCase();
+          found.push({
+            fullPath,
+            name: entry.name,
+            parts: currentPathParts,
+            isImage: imgExts.has(ext)
+          });
         } else if (entry.isDirectory() && include_subfolders) {
-          walkAndCopy(fullPath, [...currentPathParts, entry.name]);
+          const subs = await getEligibleFiles(fullPath, [...currentPathParts, entry.name]);
+          found.push(...subs);
         }
       }
+      return found;
     }
 
-    walkAndCopy(inputPath, []);
+    const eligibleFiles = await getEligibleFiles(inputPath, []);
+    const total = eligibleFiles.length;
+    let copied = 0;
+    let skipped = 0;
+    let failed = 0;
+    let compCount = 0;
+    let totalImages = 0;
+    let origTotalBytes = 0;
+    let compTotalBytes = 0;
+    const errors = [];
+    const usedNames = new Set();
 
-    // Record job in local SQLite database
+    for (const f of eligibleFiles) {
+      if (f.isImage) totalImages++;
+    }
+
+    for (let i = 0; i < eligibleFiles.length; i++) {
+      if (isCollectorCancelled) {
+        break;
+      }
+
+      const item = eligibleFiles[i];
+      let baseName = item.name;
+      if (prefix_subfolders && item.parts.length > 0) {
+        baseName = `${item.parts.join("-")}-${item.name}`;
+      }
+
+      const stem = path.basename(baseName, path.extname(baseName));
+      const fileExt = path.extname(baseName);
+      const lower = baseName.toLowerCase();
+      let targetName = baseName;
+
+      if (usedNames.has(lower)) {
+        if (duplicate_mode === "skip") {
+          skipped++;
+          continue;
+        } else if (duplicate_mode === "overwrite") {
+          targetName = baseName;
+        } else {
+          let num = 1;
+          while (true) {
+            const cand = `${stem} (${num})${fileExt}`;
+            if (!usedNames.has(cand.toLowerCase()) && !fs.existsSync(path.join(outputPath, cand))) {
+              targetName = cand;
+              break;
+            }
+            num++;
+          }
+        }
+      }
+      usedNames.add(targetName.toLowerCase());
+
+      const destPath = path.join(outputPath, targetName);
+      if (path.resolve(item.fullPath).toLowerCase() === path.resolve(destPath).toLowerCase()) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        if (enable_compression && item.isImage) {
+          const compRes = await compressImageNative(item.fullPath, destPath, compression);
+          if (compRes.status === "compressed") compCount++;
+          origTotalBytes += compRes.origBytes || 0;
+          compTotalBytes += compRes.finalBytes || 0;
+          copied++;
+        } else {
+          await fs.promises.copyFile(item.fullPath, destPath);
+          copied++;
+        }
+      } catch (err) {
+        failed++;
+        errors.push({ file: item.fullPath, error: err.message });
+      }
+
+      // Stream real-time progress update to renderer
+      const pct = Math.round(((i + 1) / total) * 100);
+      try {
+        event.sender.send("collector:progress", {
+          copied,
+          skipped,
+          failed,
+          total,
+          currentFile: targetName,
+          percent: pct,
+          compressionStats: enable_compression ? {
+            enabled: true,
+            total_images: totalImages,
+            compressed: compCount,
+            skipped: Math.max(0, totalImages - compCount),
+            original_bytes: origTotalBytes,
+            compressed_bytes: compTotalBytes,
+            saved_bytes: Math.max(0, origTotalBytes - compTotalBytes),
+            saved_percent: origTotalBytes > 0 ? Math.round((Math.max(0, origTotalBytes - compTotalBytes) / origTotalBytes) * 100) : 0
+          } : null
+        });
+      } catch (_) {}
+
+      // Critical non-blocking yield to event loop so OS window message pump runs!
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    // Save job into SQLite database
     try {
       dbInstance.execute(
         `INSERT INTO file_collection_jobs (
@@ -444,7 +602,7 @@ function setupIpcHandlers() {
           `Collect ${path.basename(inputPath)}`,
           inputPath,
           outputPath,
-          copied + skipped + failed,
+          total,
           copied,
           skipped,
           failed,
@@ -455,12 +613,24 @@ function setupIpcHandlers() {
 
     return {
       ok: true,
+      cancelled: isCollectorCancelled,
       input_folder: inputPath,
       output_folder: outputPath,
+      total,
       copied,
       skipped,
       failed,
-      errors
+      errors,
+      compression_stats: enable_compression ? {
+        enabled: true,
+        total_images: totalImages,
+        compressed: compCount,
+        skipped: Math.max(0, totalImages - compCount),
+        original_bytes: origTotalBytes,
+        compressed_bytes: compTotalBytes,
+        saved_bytes: Math.max(0, origTotalBytes - compTotalBytes),
+        saved_percent: origTotalBytes > 0 ? Math.round((Math.max(0, origTotalBytes - compTotalBytes) / origTotalBytes) * 100) : 0
+      } : null
     };
   });
 

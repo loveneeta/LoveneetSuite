@@ -751,6 +751,9 @@ export default function FileCollectorTool() {
       } catch (err: any) {
         setAlertNotice({ type: "error", text: `Collection failed: ${err.message}` });
       } finally {
+        if (unsubProgress) {
+          try { unsubProgress(); } catch (_) {}
+        }
         setIsCollecting(false);
       }
       return;
@@ -1616,6 +1619,9 @@ export default function FileCollectorTool() {
                 className="collector-btn-danger"
                 onClick={() => {
                   cancelRequestedRef.current = true;
+                  if (isDesktop()) {
+                    (window as any).electronAPI?.collector?.cancel?.();
+                  }
                   setIsCollecting(false);
                   setAlertNotice({ type: "info", text: "Operation cancelled by user." });
                 }}

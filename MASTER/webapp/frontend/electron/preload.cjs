@@ -41,7 +41,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Native High-Speed File Collector & Compressor Engine
   collector: {
     scan: (options) => ipcRenderer.invoke("collector:scan", options),
-    collect: (options) => ipcRenderer.invoke("collector:collect", options)
+    collect: (options) => ipcRenderer.invoke("collector:collect", options),
+    cancel: () => ipcRenderer.invoke("collector:cancel"),
+    onProgress: (callback) => {
+      const listener = (event, data) => callback(data);
+      ipcRenderer.on("collector:progress", listener);
+      return () => ipcRenderer.removeListener("collector:progress", listener);
+    }
   },
 
   // Synchronization Service
