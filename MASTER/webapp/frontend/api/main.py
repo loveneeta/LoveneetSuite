@@ -517,3 +517,268 @@ async def ppt_excel_export(payload: dict):
         except Exception as exc:
             raise HTTPException(500, "Generated workbook validation failed: " + str(exc)[:180])
         return StreamingResponse(io.BytesIO(out.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="PPT_to_Excel_with_Images.xlsx"'})
+
+
+def is_file_or_dir_hidden(p: Path) -> bool:
+    if p.name.startswith("."):
+        return True
+    if os.name == "nt":
+        try:
+            import stat
+            attrs = p.stat().st_file_attributes
+            if attrs & stat.FILE_ATTRIBUTE_HIDDEN:
+                return True
+        except Exception:
+            pass
+    return False
+
+def get_collector_target_filename(rel_path: Path, prefix_subfolders: bool = True) -> str:
+    parts = rel_path.parts
+    if not parts:
+        return ""
+    filename = parts[-1]
+    subfolders = parts[:-1]
+    if prefix_subfolders and subfolders:
+        return "-".join(subfolders) + "-" + filename
+    return filename
+
+def scan_collector_files(input_dir: Path, output_dir: Path, include_subfolders: bool, include_hidden: bool):
+    out_res = output_dir.resolve()
+    found_files = []
+    if not include_subfolders:
+        for p in input_dir.iterdir():
+            try:
+                if p.is_file():
+                    if not include_hidden and is_file_or_dir_hidden(p):
+                        continue
+                    if p.resolve() == out_res or out_res in p.resolve().parents:
+                        continue
+                    found_files.append(p)
+            except Exception:
+                continue
+    else:
+        for root, dirs, files in os.walk(input_dir):
+            root_path = Path(root)
+            dirs[:] = [
+                d for d in dirs
+                if (root_path / d).resolve() != out_res
+                and (include_hidden or not is_file_or_dir_hidden(root_path / d))
+            ]
+            for f in files:
+                fp = root_path / f
+                try:
+                    if not include_hidden and is_file_or_dir_hidden(fp):
+                        continue
+                    if fp.resolve() == out_res or out_res in fp.resolve().parents:
+                        continue
+                    found_files.append(fp)
+                except Exception:
+                    continue
+    return found_files
+
+
+@app.post("/api/collector/scan")
+async def collector_scan(payload: dict):
+    input_folder = (payload.get("input_folder") or "").strip()
+    if not input_folder:
+        raise HTTPException(400, "Please provide an input folder path.")
+    input_path = Path(input_folder).resolve()
+    if not input_path.exists() or not input_path.is_dir():
+        raise HTTPException(400, f"Input folder does not exist or is not a directory: {input_folder}")
+
+    output_folder = (payload.get("output_folder") or "").strip()
+    if not output_folder or Path(output_folder).resolve() == input_path:
+        output_path = (input_path / "Collected_Files").resolve()
+    else:
+        output_path = Path(output_folder).resolve()
+
+    include_subfolders = payload.get("include_subfolders", True)
+    include_hidden = payload.get("include_hidden", False)
+    prefix_subfolders = payload.get("prefix_subfolders", True)
+    duplicate_mode = payload.get("duplicate_mode", "rename")
+
+    found_files = scan_collector_files(input_path, output_path, include_subfolders, include_hidden)
+
+    used_names = set()
+    items = []
+    total_duplicates = 0
+
+    for fp in found_files:
+        try:
+            rel = fp.relative_to(input_path)
+            base_name = get_collector_target_filename(rel, prefix_subfolders)
+            stem = Path(base_name).stem
+            ext = Path(base_name).suffix
+
+            base_lower = base_name.casefold()
+            if base_lower not in used_names:
+                used_names.add(base_lower)
+                status = "eligible"
+                target_name = base_name
+            else:
+                total_duplicates += 1
+                if duplicate_mode == "skip":
+                    status = "duplicate_skipped"
+                    target_name = base_name
+                elif duplicate_mode == "overwrite":
+                    status = "overwrite"
+                    target_name = base_name
+                else:
+                    i = 1
+                    while True:
+                        cand = f"{stem} ({i}){ext}"
+                        if cand.casefold() not in used_names:
+                            used_names.add(cand.casefold())
+                            target_name = cand
+                            status = "duplicate_renamed"
+                            break
+                        i += 1
+            file_size = 0
+            try:
+                file_size = fp.stat().st_size
+            except Exception:
+                pass
+            items.append({
+                "source_path": str(fp),
+                "relative_path": rel.as_posix(),
+                "target_filename": target_name,
+                "size": file_size,
+                "status": status
+            })
+        except Exception:
+            continue
+
+    return {
+        "ok": True,
+        "input_folder": str(input_path),
+        "output_folder": str(output_path),
+        "total_found": len(found_files),
+        "total_eligible": len([x for x in items if x["status"] != "duplicate_skipped"]),
+        "total_duplicates": total_duplicates,
+        "files": items
+    }
+
+
+@app.post("/api/collector/collect")
+async def collector_collect(payload: dict):
+    input_folder = (payload.get("input_folder") or "").strip()
+    if not input_folder:
+        raise HTTPException(400, "Please provide an input folder path.")
+    input_path = Path(input_folder).resolve()
+    if not input_path.exists() or not input_path.is_dir():
+        raise HTTPException(400, f"Input folder does not exist: {input_folder}")
+
+    output_folder = (payload.get("output_folder") or "").strip()
+    if not output_folder or Path(output_folder).resolve() == input_path:
+        output_path = (input_path / "Collected_Files").resolve()
+    else:
+        output_path = Path(output_folder).resolve()
+
+    include_subfolders = payload.get("include_subfolders", True)
+    include_hidden = payload.get("include_hidden", False)
+    prefix_subfolders = payload.get("prefix_subfolders", True)
+    duplicate_mode = payload.get("duplicate_mode", "rename")
+
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to create output folder: {str(exc)}")
+
+    found_files = scan_collector_files(input_path, output_path, include_subfolders, include_hidden)
+
+    used_names = set()
+    copied_count = 0
+    skipped_count = 0
+    failed_count = 0
+    errors = []
+
+    for fp in found_files:
+        try:
+            rel = fp.relative_to(input_path)
+            base_name = get_collector_target_filename(rel, prefix_subfolders)
+            stem = Path(base_name).stem
+            ext = Path(base_name).suffix
+
+            base_lower = base_name.casefold()
+            if base_lower not in used_names:
+                used_names.add(base_lower)
+                target_name = base_name
+            else:
+                if duplicate_mode == "skip":
+                    skipped_count += 1
+                    continue
+                elif duplicate_mode == "overwrite":
+                    target_name = base_name
+                else:
+                    i = 1
+                    while True:
+                        cand = f"{stem} ({i}){ext}"
+                        if cand.casefold() not in used_names:
+                            used_names.add(cand.casefold())
+                            target_name = cand
+                            break
+                        i += 1
+
+            dest_file = output_path / target_name
+
+            # Prevent copying onto itself
+            try:
+                if fp.resolve() == dest_file.resolve():
+                    skipped_count += 1
+                    continue
+            except Exception:
+                pass
+
+            # Check if file already exists on disk from prior operations
+            if dest_file.exists():
+                if duplicate_mode == "skip":
+                    skipped_count += 1
+                    continue
+                elif duplicate_mode == "rename":
+                    i = 1
+                    while dest_file.exists() or dest_file.name.casefold() in used_names:
+                        target_name = f"{stem} ({i}){ext}"
+                        dest_file = output_path / target_name
+                        i += 1
+                    used_names.add(dest_file.name.casefold())
+
+            shutil.copy2(fp, dest_file)
+            copied_count += 1
+        except Exception as exc:
+            failed_count += 1
+            errors.append({"file": str(fp), "error": str(exc)})
+
+    return {
+        "ok": True,
+        "input_folder": str(input_path),
+        "output_folder": str(output_path),
+        "total": len(found_files),
+        "copied": copied_count,
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "errors": errors
+    }
+
+
+@app.post("/api/collector/open-folder")
+async def collector_open_folder(payload: dict):
+    folder = (payload.get("folder") or "").strip()
+    if not folder:
+        raise HTTPException(400, "Folder path is required")
+    p = Path(folder).resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(404, f"Directory does not exist: {folder}")
+    try:
+        if os.name == "nt":
+            try:
+                os.startfile(str(p))
+            except Exception:
+                subprocess.Popen(["explorer", str(p)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p)])
+        return {"ok": True, "message": f"Opened {folder}"}
+    except Exception as exc:
+        raise HTTPException(500, f"Could not open directory: {str(exc)}")
+
