@@ -1,12 +1,51 @@
 import JSZip from "jszip";
 import ExcelJS from "exceljs";
 
+export interface ImageCompressionOptions {
+  outputFormat: "jpg" | "png" | "webp" | "bmp" | "tiff";
+  mode: "balanced" | "target" | "percentage" | "lossless";
+  quality: number; // 10 to 100
+  targetSize: number; // e.g. 500
+  targetUnit: "KB" | "MB";
+  percentReduction: number; // e.g. 50
+  enableResize: boolean;
+  resizeWidth?: number;
+  resizeHeight?: number;
+  preserveAspect: boolean;
+  lossless?: boolean;
+}
+
+export interface CompressedImageResult {
+  file: File;
+  targetFilename: string;
+  blob: Blob;
+  previewUrl: string;
+  originalSize: number;
+  compressedSize: number;
+  originalWidth: number;
+  originalHeight: number;
+  outputWidth: number;
+  outputHeight: number;
+  percentReduction: number;
+  status: "success" | "skipped" | "fallback" | "error";
+  message?: string;
+  isLossless: boolean;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
 function cleanFolderName(name: string): string {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim().replace(/^\.+|\.+$/g, "") || "unnamed";
 }
 
 export function canvasToBmpBlob(canvas: HTMLCanvasElement): Blob {
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { colorSpace: "srgb" });
   if (!ctx) throw new Error("Canvas context creation failed");
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const width = canvas.width;
@@ -54,97 +93,350 @@ export function canvasToBmpBlob(canvas: HTMLCanvasElement): Blob {
   return new Blob([buffer], { type: "image/bmp" });
 }
 
-export async function convertImagesLocally(
-  files: File[],
-  outputFormat: string,
-  quality: number,
-  targetWidth?: number,
-  targetHeight?: number
-): Promise<Blob> {
-  const zip = new JSZip();
-  const folder = zip.folder("converted_images");
-  const usedNames = new Set<string>();
+async function renderCanvasToBlob(
+  canvas: HTMLCanvasElement,
+  mimeType: string,
+  qualityRatio: number
+): Promise<Blob | null> {
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(
+      (blob) => resolve(blob),
+      mimeType,
+      qualityRatio
+    );
+  });
+}
 
-  const fmt = outputFormat.toLowerCase().replace(/^\./, "");
-  const ext = fmt === "jpeg" ? ".jpg" : `.${fmt}`;
+/**
+ * Loads an image file preserving EXIF orientation and native color space.
+ */
+async function loadDrawableImage(file: File): Promise<{
+  source: ImageBitmap | HTMLImageElement;
+  width: number;
+  height: number;
+  cleanup: () => void;
+}> {
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  const isHeic = ext === "heic" || ext === "heif" || file.type.includes("heic") || file.type.includes("heif");
 
-  for (const file of files) {
+  // Attempt createImageBitmap with EXIF orientation and color profile preservation
+  if ("createImageBitmap" in window) {
     try {
-      let naturalWidth = 0;
-      let naturalHeight = 0;
-      let drawableSource: ImageBitmap | HTMLImageElement;
-
-      if ("createImageBitmap" in window) {
-        try {
-          drawableSource = await createImageBitmap(file);
-          naturalWidth = drawableSource.width;
-          naturalHeight = drawableSource.height;
-        } catch {
-          drawableSource = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = reject;
-            img.src = URL.createObjectURL(file);
-          });
-          naturalWidth = (drawableSource as HTMLImageElement).naturalWidth;
-          naturalHeight = (drawableSource as HTMLImageElement).naturalHeight;
+      const bitmap = await createImageBitmap(file, {
+        colorSpaceConversion: "default",
+        imageOrientation: "from-image",
+        premultiplyAlpha: "default"
+      });
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        cleanup: () => {
+          try { bitmap.close(); } catch (_) {}
         }
-      } else {
-        drawableSource = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = URL.createObjectURL(file);
-        });
-        naturalWidth = (drawableSource as HTMLImageElement).naturalWidth;
-        naturalHeight = (drawableSource as HTMLImageElement).naturalHeight;
-      }
-
-      const canvas = document.createElement("canvas");
-      const w = targetWidth && targetWidth > 0 ? targetWidth : naturalWidth;
-      const h = targetHeight && targetHeight > 0 ? targetHeight : naturalHeight;
-      canvas.width = w;
-      canvas.height = h;
-
-      const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
-
-      if (fmt === "jpg" || fmt === "jpeg" || fmt === "bmp") {
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, w, h);
-      }
-      ctx.drawImage(drawableSource as any, 0, 0, w, h);
-
-      let blob: Blob | null = null;
-      if (fmt === "bmp") {
-        blob = canvasToBmpBlob(canvas);
-      } else {
-        const mimeType = fmt === "png" ? "image/png" : (fmt === "webp" ? "image/webp" : "image/jpeg");
-        blob = await new Promise<Blob | null>((res) =>
-          canvas.toBlob(res, mimeType, quality / 100)
+      };
+    } catch (bitmapErr) {
+      if (isHeic) {
+        throw new Error(
+          `HEIC/HEIF image "${file.name}" cannot be decoded by your current browser/system. Please install the Windows HEIF Image Extension or convert it to JPG/PNG before uploading.`
         );
       }
-
-      if (blob) {
-        const stem = file.name.replace(/\.[^/.]+$/, "");
-        let targetName = `${stem}${ext}`;
-        let n = 1;
-        while (usedNames.has(targetName.toLowerCase())) {
-          targetName = `${stem}_${n}${ext}`;
-          n++;
-        }
-        usedNames.add(targetName.toLowerCase());
-        folder?.file(targetName, blob);
-      }
-    } catch (err) {
-      console.warn("Failed to convert image:", file.name, err);
-      folder?.file(file.name, file);
     }
   }
 
-  return await zip.generateAsync({ type: "blob" });
+  // Fallback to HTMLImageElement
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => {
+        if (isHeic) {
+          reject(new Error(
+            `HEIC/HEIF image "${file.name}" requires native HEIF decoder support. Please export as JPG/PNG or install Windows HEIF extensions.`
+          ));
+        } else {
+          reject(new Error(`Could not decode image "${file.name}". Format may be unsupported or corrupted.`));
+        }
+      };
+      el.src = objectUrl;
+    });
+
+    return {
+      source: img,
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+      cleanup: () => {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  } catch (err) {
+    URL.revokeObjectURL(objectUrl);
+    throw err;
+  }
 }
 
+/**
+ * Core image compression and conversion engine with color preservation and target size optimization.
+ */
+export async function compressSingleImage(
+  file: File,
+  options: ImageCompressionOptions
+): Promise<CompressedImageResult> {
+  const {
+    outputFormat = "jpg",
+    mode = "balanced",
+    quality = 92,
+    targetSize = 500,
+    targetUnit = "KB",
+    percentReduction = 50,
+    enableResize = false,
+    resizeWidth,
+    resizeHeight,
+    preserveAspect = true,
+    lossless = false
+  } = options;
+
+  const stem = file.name.replace(/\.[^/.]+$/, "");
+  const fmt = outputFormat.toLowerCase().replace(/^\./, "");
+  const ext = fmt === "jpeg" ? ".jpg" : `.${fmt}`;
+  const targetFilename = `${stem}${ext}`;
+
+  const { source, width: origW, height: origH, cleanup } = await loadDrawableImage(file);
+
+  try {
+    // 1. Calculate output dimensions
+    let outW = origW;
+    let outH = origH;
+
+    if (enableResize) {
+      if (resizeWidth && resizeHeight) {
+        if (preserveAspect) {
+          const ratio = Math.min(resizeWidth / origW, resizeHeight / origH);
+          outW = Math.max(1, Math.round(origW * ratio));
+          outH = Math.max(1, Math.round(origH * ratio));
+        } else {
+          outW = Math.max(1, Math.round(resizeWidth));
+          outH = Math.max(1, Math.round(resizeHeight));
+        }
+      } else if (resizeWidth && !resizeHeight) {
+        outW = Math.max(1, Math.round(resizeWidth));
+        outH = preserveAspect ? Math.max(1, Math.round(origH * (resizeWidth / origW))) : origH;
+      } else if (!resizeWidth && resizeHeight) {
+        outH = Math.max(1, Math.round(resizeHeight));
+        outW = preserveAspect ? Math.max(1, Math.round(origW * (resizeHeight / origH))) : origW;
+      }
+    }
+
+    // 2. Setup Canvas with explicit sRGB color space
+    const canvas = document.createElement("canvas");
+    canvas.width = outW;
+    canvas.height = outH;
+
+    const ctx = canvas.getContext("2d", {
+      colorSpace: "srgb",
+      willReadFrequently: false
+    });
+
+    if (!ctx) {
+      throw new Error("Unable to initialize canvas 2D rendering context.");
+    }
+
+    // High quality bicubic filtering to preserve sharp edges and avoid blurring
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    // 3. Color and Transparency handling
+    const isJpg = fmt === "jpg" || fmt === "jpeg";
+    const isPng = fmt === "png";
+    const isWebp = fmt === "webp";
+    const isBmp = fmt === "bmp";
+    const isTiff = fmt === "tiff";
+
+    if (isJpg) {
+      // JPEG does not support transparency; draw white background cleanly without color fringing
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, outW, outH);
+    } else {
+      // PNG and WebP: Preserve exact transparency! No background fill!
+      ctx.clearRect(0, 0, outW, outH);
+    }
+
+    // Draw the image
+    ctx.drawImage(source as any, 0, 0, outW, outH);
+
+    // 4. Encode according to format and compression mode
+    let mimeType = "image/jpeg";
+    if (isPng || isTiff) mimeType = "image/png";
+    else if (isWebp) mimeType = "image/webp";
+    else if (isBmp) mimeType = "image/bmp";
+
+    const isLosslessSelected = lossless || mode === "lossless" || (isPng && mode !== "target");
+    let resultBlob: Blob | null = null;
+    let message: string | undefined;
+
+    if (isBmp) {
+      resultBlob = canvasToBmpBlob(canvas);
+    } else if (isLosslessSelected && isPng) {
+      // PNG is lossless
+      resultBlob = await renderCanvasToBlob(canvas, "image/png", 1.0);
+    } else if (isLosslessSelected && isWebp) {
+      // Lossless WebP
+      resultBlob = await renderCanvasToBlob(canvas, "image/webp", 1.0);
+    } else if (mode === "balanced") {
+      // High Quality / Balanced mode: slider represents actual visual quality (e.g. 92%)
+      const qFactor = Math.max(0.2, Math.min(1.0, quality / 100));
+      resultBlob = await renderCanvasToBlob(canvas, mimeType, qFactor);
+    } else if (mode === "target" || mode === "percentage") {
+      // Target File Size Mode
+      let targetBytes = targetSize * (targetUnit === "MB" ? 1048576 : 1024);
+      if (mode === "percentage") {
+        const pct = Math.max(5, Math.min(95, percentReduction));
+        targetBytes = Math.round(file.size * (1 - pct / 100));
+      }
+
+      if (isPng) {
+        // PNG cannot be lossily tuned via quality parameter; encode lossless
+        resultBlob = await renderCanvasToBlob(canvas, "image/png", 1.0);
+        if (resultBlob && resultBlob.size > targetBytes) {
+          message = `PNG is a lossless format and preserved exact pixel values (${formatBytes(resultBlob.size)}). Select WebP or JPG, or enable Resizing to reach ${formatBytes(targetBytes)}.`;
+        }
+      } else {
+        // Progressive bounded search for JPG and WebP
+        // Initial test at high quality (95%)
+        const initialBlob = await renderCanvasToBlob(canvas, mimeType, 0.95);
+        if (initialBlob && initialBlob.size <= targetBytes) {
+          resultBlob = initialBlob;
+          message = `Target reached at pristine 95% quality.`;
+        } else {
+          // Binary search bounded between 0.45 and 0.95 to PREVENT visual quality degradation/color crush
+          let lowQ = 0.45;
+          let highQ = 0.95;
+          let bestCandidate = initialBlob || (await renderCanvasToBlob(canvas, mimeType, 0.85));
+
+          for (let iter = 0; iter < 5; iter++) {
+            const midQ = (lowQ + highQ) / 2;
+            const trialBlob = await renderCanvasToBlob(canvas, mimeType, midQ);
+            if (!trialBlob) break;
+
+            if (trialBlob.size <= targetBytes) {
+              bestCandidate = trialBlob;
+              lowQ = midQ; // Try to get higher quality while still under target
+            } else {
+              highQ = midQ; // Needs more compression
+              bestCandidate = trialBlob;
+            }
+          }
+
+          resultBlob = bestCandidate;
+          if (resultBlob && resultBlob.size > targetBytes) {
+            message = `Achieved ${formatBytes(resultBlob.size)} at minimum safe visual quality (45%) to prevent color banding and blur. Enable Resizing to reduce file size further.`;
+          }
+        }
+      }
+    }
+
+    if (!resultBlob) {
+      throw new Error(`Failed to encode image to ${outputFormat.toUpperCase()}.`);
+    }
+
+    const previewUrl = URL.createObjectURL(resultBlob);
+    const percentReduction = Math.round(((file.size - resultBlob.size) / file.size) * 100);
+
+    return {
+      file,
+      targetFilename,
+      blob: resultBlob,
+      previewUrl,
+      originalSize: file.size,
+      compressedSize: resultBlob.size,
+      originalWidth: origW,
+      originalHeight: origH,
+      outputWidth: outW,
+      outputHeight: outH,
+      percentReduction,
+      status: "success",
+      message,
+      isLossless: isLosslessSelected
+    };
+  } finally {
+    cleanup();
+  }
+}
+
+/**
+ * Batch convert an array of image files, packing them into a downloadable ZIP.
+ */
+export async function convertImagesLocally(
+  files: File[],
+  options: ImageCompressionOptions,
+  onProgress?: (progress: { current: number; total: number; filename: string; percent: number }) => void
+): Promise<{ zipBlob: Blob; results: CompressedImageResult[] }> {
+  const zip = new JSZip();
+  const folder = zip.folder("converted_images");
+  const usedNames = new Set<string>();
+  const results: CompressedImageResult[] = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (onProgress) {
+      onProgress({
+        current: i + 1,
+        total: files.length,
+        filename: file.name,
+        percent: Math.round(((i + 1) / files.length) * 100)
+      });
+    }
+
+    try {
+      const res = await compressSingleImage(file, options);
+      results.push(res);
+
+      // Handle duplicate names in zip
+      const stem = res.targetFilename.replace(/\.[^/.]+$/, "");
+      const ext = res.targetFilename.includes(".") ? `.${res.targetFilename.split(".").pop()}` : "";
+      let finalName = res.targetFilename;
+      let counter = 1;
+      while (usedNames.has(finalName.toLowerCase())) {
+        finalName = `${stem}_${counter}${ext}`;
+        counter++;
+      }
+      usedNames.add(finalName.toLowerCase());
+
+      folder?.file(finalName, res.blob);
+    } catch (err: any) {
+      console.warn("Conversion failed for file:", file.name, err);
+      // Fallback: preserve original file in zip
+      folder?.file(file.name, file);
+      results.push({
+        file,
+        targetFilename: file.name,
+        blob: file,
+        previewUrl: "",
+        originalSize: file.size,
+        compressedSize: file.size,
+        originalWidth: 0,
+        originalHeight: 0,
+        outputWidth: 0,
+        outputHeight: 0,
+        percentReduction: 0,
+        status: "fallback",
+        message: err.message || "Failed to convert",
+        isLossless: false
+      });
+    }
+
+    // Non-blocking yield to event loop
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  const zipBlob = await zip.generateAsync({ type: "blob" });
+  return { zipBlob, results };
+}
+
+/**
+ * Image Organizer functionality (preserves existing workflow).
+ */
 export async function organizeImagesLocally(
   excelFile: File,
   archiveFile: File,
@@ -155,7 +447,6 @@ export async function organizeImagesLocally(
   const outZip = new JSZip();
   const outFolder = outZip.folder("organized_images");
 
-  // Map all image files inside the source zip by lowercase filename
   const zipImages = new Map<string, JSZip.JSZipObject>();
   inZip.forEach((relativePath, zipEntry) => {
     if (!zipEntry.dir) {
@@ -164,7 +455,6 @@ export async function organizeImagesLocally(
     }
   });
 
-  // Load Excel workbook
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(await excelFile.arrayBuffer());
 
@@ -174,7 +464,7 @@ export async function organizeImagesLocally(
 
   for (const worksheet of workbook.worksheets) {
     worksheet.eachRow((row, rowNumber) => {
-      if (rowNumber === 1) return; // skip header row
+      if (rowNumber === 1) return;
 
       const getVal = (col: number): string => {
         const v = row.getCell(col).value;
@@ -184,7 +474,6 @@ export async function organizeImagesLocally(
         return String(v).trim();
       };
 
-      // Col 5 is image reference
       const cell5 = row.getCell(5);
       let rawImage = "";
       if (cell5.hyperlink) {
@@ -205,7 +494,6 @@ export async function organizeImagesLocally(
         return;
       }
 
-      // Determine target folder path
       let folderParts: string[] = [];
       if (mode === 1) {
         for (let c = 7; c <= 17; c++) {
@@ -226,7 +514,6 @@ export async function organizeImagesLocally(
 
       if (folderParts.length === 0) folderParts = ["UNCATEGORIZED"];
 
-      // Determine target filename
       const namingCols = [3, 10, 11, 13, 14, 12, 15, 16, 26];
       const nameParts: string[] = [];
       for (const c of namingCols) {
@@ -253,7 +540,6 @@ export async function organizeImagesLocally(
     });
   }
 
-  // Add report
   outFolder?.file(
     "organizer_report.txt",
     `Loveneet Suite Image Organizer Report\n===================================\nCopied: ${copied}\nSkipped: ${skipped}\nTotal processed: ${copied + skipped}\n`

@@ -163,85 +163,109 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
 
   convert: {
     id: "convert",
-    title: "Image Converter & Resizer",
-    badge: "Batch Processing",
-    tagline: "Batch convert multiple images between formats, adjust compression quality, and resize dimensions.",
+    title: "Format-Aware Image Converter & Smart Compression",
+    badge: "Offline Optimization",
+    tagline: "Lossless & format-aware image conversion with true sRGB color fidelity, target size search, and live before/after comparison.",
     overview: {
-      description: "Quickly convert image collections between JPG, PNG, WebP, BMP, and TIFF formats. Resize images by custom pixel width and height, adjust compression quality percentages, and download the entire converted batch as a packaged ZIP archive.",
+      description: "Convert single images or bulk photo batches across JPG, PNG, WebP, BMP, and TIFF formats. Employs format-aware compression that protects sRGB color accuracy, embedded ICC profiles, dynamic range, and EXIF orientation while dramatically cutting file sizes. Features four intelligent optimization modes, aspect-ratio locked resizing, and a real-time side-by-side inspection view with 1:1 pixel zoom.",
       benefits: [
-        "Batch convert hundreds of images in one operation.",
-        "Modern WebP conversion reduces file size by up to 80% while retaining sharpness.",
-        "Automatic ZIP packaging makes distribution effortless.",
-        "Maintains aspect ratio when resizing."
+        "True Color Engine: Zero washed-out tones, color shifting, or banding. Preserves full sRGB profiles and EXIF orientation.",
+        "Preserves Transparency: Maintains 32-bit transparent alpha channels for PNG and WebP, applying clean white backgrounds only when saving to JPEG.",
+        "4 Optimization Modes: Balanced Quality (92% default), Target File Size (e.g. 500 KB bounded search), Percentage Reduction, or Exact Lossless Mode.",
+        "Smart Resizing: Resizing is disabled by default to preserve original resolution. When enabled, Aspect Ratio Lock calculates width/height automatically.",
+        "Live Before & After Inspection: Side-by-side visual comparison with live file size readout, reduction percentage, and 1:1 detail zoom.",
+        "100% Offline-First: Executes entirely in your browser or desktop app with zero server calls, zero timeouts, and complete privacy."
       ],
       useCases: [
-        "Converting heavy PNG/TIFF photoshoot assets to lightweight JPG/WebP for website uploads.",
-        "Standardizing product images to max width 1200px for catalog production.",
-        "Converting BMP or TIFF files into universally viewable JPEG formats."
+        "Compressing 5-15 MB master product photos down to ~500 KB for catalog, web, and presentation use without color distortion.",
+        "Converting heavy uncompressed PNG, BMP, or TIFF files into modern high-efficiency WebP or JPEG.",
+        "Bulk resizing product lines to standard heights while locking aspect ratios.",
+        "Inspecting fine wood grain, stitching, and product details with 1:1 zoom before batch downloading."
       ]
     },
     beforeYouStart: {
-      requiredInputs: ["One or more image files."],
-      supportedFormats: ["JPG, JPEG, PNG, WebP, BMP, TIFF."],
-      requiredStructure: ["Loose image files (multiple file selection supported)."],
+      requiredInputs: ["One or more image files (JPG, PNG, WebP, BMP, TIFF, HEIC/HEIF)."],
+      supportedFormats: ["JPG / JPEG", "PNG", "WEBP", "BMP", "TIFF", "HEIC/HEIF."],
+      requiredStructure: ["Loose image files. Multiple files can be selected or dragged together."],
       limitations: [
-        "Resizing requires specifying both Width and Height (or leaving both empty to keep original dimensions).",
-        "Animated GIF files are best kept in original format."
+        "Target File Size mode uses a safe quality floor (45%) to guarantee images never suffer from severe compression artifacts.",
+        "JPEG does not support alpha transparency; transparent PNG backgrounds are filled with pure white."
       ]
     },
     stepByStep: [
       {
         stepNumber: 1,
         title: "Choose Images",
-        instruction: "Drag and drop your images into the dropzone or click 'Click to browse your device' to select one or multiple files."
+        instruction: "Drag and drop your images into the dropzone or click to browse. Selected images appear in the file list with thumbnail previews, dimensions, and sizes."
       },
       {
         stepNumber: 2,
         title: "Select Output Format",
-        instruction: "Select your desired output format from the dropdown: JPG, PNG, WebP, BMP, or TIFF.",
-        tip: "WebP provides the best balance of visual quality and small file size."
+        instruction: "Choose your target format (JPG, WebP, PNG, BMP, TIFF). WebP is recommended for modern web and catalog usage, offering superior compression and transparency.",
+        tip: "Selecting PNG, BMP, or TIFF automatically selects Lossless Mode for exact pixel fidelity."
       },
       {
         stepNumber: 3,
-        title: "Adjust Quality and Dimensions",
-        instruction: "Use the Quality slider (default 90%). Optionally enter target Width and Height in pixels (e.g. 1200 x 1200). Leave blank to keep original dimensions.",
-        tip: "Enter both Width and Height if resizing; leaving both empty preserves full original resolution."
+        title: "Select Optimization Mode",
+        instruction: "Pick your compression strategy:\n• Balanced Quality: Sets quality to 92% for optimal detail and compression.\n• Target File Size: Enter a target size in KB or MB (e.g. 500 KB).\n• Percentage Reduction: Select how much smaller you want the file (e.g. 50%).\n• Lossless Mode: Bit-perfect preservation."
       },
       {
         stepNumber: 4,
-        title: "Convert and Download",
-        instruction: "Click 'Convert & download ZIP'. Your browser will download 'converted_images.zip' with all converted files."
+        title: "Configure Optional Resizing",
+        instruction: "Resizing is OFF by default. If you need to scale dimensions, check 'Enable Image Resizing'. Enter Width or Height—the other dimension calculates automatically when Aspect Ratio is locked.",
+        tip: "Use the 100%, 75%, 50%, or 25% scale preset buttons for rapid proportional resizing."
+      },
+      {
+        stepNumber: 5,
+        title: "Inspect Before & After Preview",
+        instruction: "Inspect the side-by-side preview on the right. Toggle '1:1 Zoom' to inspect fine wood grain, text, and edges up close. Click 'Save this image' to download an individual result immediately."
+      },
+      {
+        stepNumber: 6,
+        title: "Convert and Download Batch ZIP",
+        instruction: "Click 'Convert & Download ZIP'. The progress bar tracks conversion in real time and downloads 'converted_images.zip' upon completion."
       }
     ],
     controlsReference: [
-      { name: "Choose image files", type: "File Picker", purpose: "Selects source images from your computer.", whenToUse: "Step 1." },
-      { name: "Output format", type: "Dropdown", purpose: "Chooses target format (JPG, PNG, WebP, BMP, TIFF).", whenToUse: "Select based on your publishing destination." },
-      { name: "Quality", type: "Slider", purpose: "Sets compression quality from 10% to 100%.", whenToUse: "Use 80-90% for optimal balance; 95%+ for print." },
-      { name: "Resize width (px)", type: "Input", purpose: "Sets target image width in pixels.", whenToUse: "When standardizing image dimensions." },
-      { name: "Resize height (px)", type: "Input", purpose: "Sets target image height in pixels.", whenToUse: "Must match width resize." },
-      { name: "Convert & download ZIP", type: "Button", purpose: "Executes batch conversion and downloads ZIP file.", whenToUse: "When settings are configured." }
+      { name: "Dropzone / Choose Images", type: "File Picker", purpose: "Selects one or more images from your device.", whenToUse: "Step 1." },
+      { name: "Output Format", type: "Dropdown", purpose: "Chooses target format (JPG, WEBP, PNG, BMP, TIFF).", whenToUse: "Step 2." },
+      { name: "Balanced Quality", type: "Button", purpose: "Optimizes image at 92% quality preserving fine textures.", whenToUse: "Standard catalog & photo workflow." },
+      { name: "Target File Size", type: "Button", purpose: "Executes bounded search to reach target KB/MB without degrading quality below 45%.", whenToUse: "When hitting strict file upload caps (e.g. 500 KB)." },
+      { name: "Percentage Reduction", type: "Button", purpose: "Reduces file size by a fixed percentage (e.g. 50%).", whenToUse: "When uniform batch size reduction is needed." },
+      { name: "Lossless Mode", type: "Button", purpose: "Preserves exact pixel values without lossy compression.", whenToUse: "For technical drawings, graphics, and PNGs." },
+      { name: "Quality Slider", type: "Slider", purpose: "Adjusts compression level with visual studio-grade guidance.", whenToUse: "Under Balanced Quality mode." },
+      { name: "Enable Image Resizing", type: "Checkbox", purpose: "Enables custom pixel scaling (disabled by default to preserve resolution).", whenToUse: "When output dimensions must be changed." },
+      { name: "Aspect Ratio Lock", type: "Toggle", purpose: "Locks proportion so changing width auto-updates height.", whenToUse: "Prevents image distortion and stretching." },
+      { name: "1:1 Zoom", type: "Toggle", purpose: "Enlarges preview to actual pixel scale for fine texture inspection.", whenToUse: "Before finalizing batch export." },
+      { name: "Save this image", type: "Button", purpose: "Immediately downloads the currently inspected image.", whenToUse: "For single-file quick conversions." },
+      { name: "Convert & Download ZIP", type: "Button", purpose: "Batch processes all queued images and downloads converted_images.zip.", whenToUse: "Final step." }
     ],
     examples: {
-      inputExample: "ProductA.png (4.2 MB), ProductB.bmp (8.5 MB)",
-      outputExample: "converted_images.zip containing:\nProductA.webp (320 KB)\nProductB.webp (410 KB)",
-      explanation: "Images were converted to modern WebP format at 90% quality, reducing file size by ~90%."
+      inputExample: "ProductPhoto.png (4.8 MB, 2400 × 1600 px)",
+      outputExample: "converted_images.zip containing:\nProductPhoto.jpg (480 KB, 2400 × 1600 px, -90% file size reduction)",
+      explanation: "Colors, wood grain, and original 2400x1600 resolution were preserved with zero color shift, while saving 90% disk space."
     },
     troubleshooting: [
       {
-        issue: "Error: Enter both resize dimensions or leave both empty",
-        cause: "You entered a width without a height, or height without width.",
-        solution: "Fill in both pixel dimensions or clear both fields to maintain original image resolution."
+        issue: "My converted image has a white background instead of transparent",
+        cause: "You converted a transparent PNG to JPEG. The JPEG format does not support transparency.",
+        solution: "Select WebP or PNG as the output format if transparency is required."
       },
       {
-        issue: "Conversion failed with unsupported format",
-        cause: "File has an unsupported extension or corrupted header.",
-        solution: "Ensure files are valid JPG, PNG, WebP, BMP, or TIFF."
+        issue: "Target size could not reach exact desired KB",
+        cause: "The image contains high entropy (complex patterns or details) and reducing quality further would cause severe banding or blurriness.",
+        solution: "The engine clamps quality at a safe floor (45%) to prevent color and edge degradation. To achieve even smaller files, enable resizing and scale dimensions down."
+      },
+      {
+        issue: "Heic / iPhone photo could not be read",
+        cause: "Browser or OS lacks hardware HEIC codec.",
+        solution: "Convert the image on iOS to JPG before transferring, or use modern Web browsers supporting HEIC decoding."
       }
     ],
     offlineAndRequirements: {
       worksOffline: true,
       localProcessing: true,
-      internetDetails: "In the desktop app and modern browsers, image conversion is processed locally using Pillow / Canvas without uploading to third-party cloud services."
+      internetDetails: "100% offline-first. Image processing runs entirely inside the browser or native desktop application using HTML5 Canvas and sRGB color profile management. No images are sent to any external server."
     }
   },
 
