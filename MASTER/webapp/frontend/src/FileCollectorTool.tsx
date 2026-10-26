@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import JSZip from "jszip";
 import "./file-collector.css";
+import { isDesktop, fileAdapter, storageAdapter } from "./services/platform";
 
 const saveAs = (blob: Blob, filename: string) => {
   const url = URL.createObjectURL(blob);
@@ -241,8 +242,26 @@ export default function FileCollectorTool() {
     setCollectionDone(false);
   };
 
-  // Modern Directory Picker for Chrome/Edge (File System Access API)
+  // Directory Picker (Native Electron on Desktop / File System Access API on Web)
   const handlePickDirectory = async (forTarget: "input" | "output") => {
+    if (isDesktop()) {
+      const selected = await fileAdapter.pickDirectory(
+        forTarget === "input" ? "Select Input Folder" : "Select Output Folder"
+      );
+      if (selected) {
+        if (forTarget === "input") {
+          handleInputChange(selected);
+          setAlertNotice({
+            type: "info",
+            text: `Selected folder: "${selected}". Click "Scan Files" or "Start Collection" to process.`
+          });
+        } else {
+          setOutputFolder(selected);
+        }
+      }
+      return;
+    }
+
     if ("showDirectoryPicker" in window) {
       try {
         const dirHandle = await (window as any).showDirectoryPicker({
@@ -379,6 +398,49 @@ export default function FileCollectorTool() {
     setIsScanning(true);
     setAlertNotice(null);
     setCollectionDone(false);
+
+    // Desktop Native Scanner
+    if (isDesktop()) {
+      let targetInput = inputFolder.trim();
+      if (!targetInput) {
+        const picked = await fileAdapter.pickDirectory("Select Input Folder to Scan");
+        if (picked) {
+          targetInput = picked;
+          handleInputChange(picked);
+        } else {
+          setIsScanning(false);
+          return;
+        }
+      }
+
+      try {
+        const targetOut = outputFolder.trim() || `${targetInput.replace(/[\\/]+$/, "")}\\Collected_Files`;
+        const res = await (window as any).electronAPI.collector.scan({
+          inputFolder: targetInput,
+          outputFolder: targetOut,
+          includeSubfolders,
+          includeHidden,
+          prefixSubfolders,
+          duplicateMode
+        });
+        setScannedFiles(res.files || []);
+        setTotalFound(res.total_found || 0);
+        setTotalImages(res.total_images || 0);
+        setTotalDuplicates(res.total_duplicates || 0);
+        if (res.output_folder) {
+          setOutputFolder(res.output_folder);
+        }
+        setAlertNotice({
+          type: "success",
+          text: `Scan complete: Found ${res.total_found} file(s) on your disk. Ready to collect.`
+        });
+      } catch (err: any) {
+        setAlertNotice({ type: "error", text: `Desktop scan failed: ${err.message}` });
+      } finally {
+        setIsScanning(false);
+      }
+      return;
+    }
 
     // If browser holds a native DirectoryHandle
     if (inputDirHandleRef.current) {
@@ -613,6 +675,87 @@ export default function FileCollectorTool() {
   const executeCollection = async () => {
     setShowOverwriteModal(false);
 
+    // Desktop Native Collection
+    if (isDesktop()) {
+      let targetInput = inputFolder.trim();
+      if (!targetInput) {
+        const picked = await fileAdapter.pickDirectory("Select Input Folder");
+        if (picked) {
+          targetInput = picked;
+          handleInputChange(picked);
+        } else {
+          setAlertNotice({ type: "error", text: "Please select an input folder." });
+          return;
+        }
+      }
+
+      setIsCollecting(true);
+      cancelRequestedRef.current = false;
+      setCollectionDone(false);
+      setCollectionErrors([]);
+      setCompressionStats(null);
+      setCollectProgress({
+        copied: 0,
+        skipped: 0,
+        failed: 0,
+        total: totalFound || scannedFiles.length || 1,
+        currentFile: "Collecting files locally on disk...",
+        percent: 15
+      });
+
+      const targetOut = outputFolder.trim() || `${targetInput.replace(/[\\/]+$/, "")}\\Collected_Files`;
+
+      try {
+        const res = await (window as any).electronAPI.collector.collect({
+          inputFolder: targetInput,
+          outputFolder: targetOut,
+          includeSubfolders,
+          includeHidden,
+          prefixSubfolders,
+          duplicateMode,
+          enableCompression,
+          compression: getCompressionPayload()
+        });
+
+        const outDir = res.output_folder || targetOut;
+        setLastOutputFolder(outDir);
+        setCollectProgress({
+          copied: res.copied || 0,
+          skipped: res.skipped || 0,
+          failed: res.failed || 0,
+          total: res.total || 0,
+          currentFile: "Completed",
+          percent: 100
+        });
+        setCollectionErrors((res.errors || []).map((e: any) => ({ file: e.file || e.name || "File", error: e.error })));
+        if (res.compression_stats) {
+          setCompressionStats(res.compression_stats);
+        }
+        setCollectionDone(true);
+        setAlertNotice({
+          type: "success",
+          text: `Collection finished! ${res.copied} file(s) saved directly into "${outDir}".`
+        });
+
+        // Store collection job in local SQLite database
+        await storageAdapter.saveCollectionJob({
+          inputFolder: targetInput,
+          outputFolder: outDir,
+          totalFiles: res.total || 0,
+          copiedCount: res.copied || 0,
+          skippedCount: res.skipped || 0,
+          failedCount: res.failed || 0,
+          compressionEnabled: enableCompression,
+          status: "completed"
+        });
+      } catch (err: any) {
+        setAlertNotice({ type: "error", text: `Collection failed: ${err.message}` });
+      } finally {
+        setIsCollecting(false);
+      }
+      return;
+    }
+
     // If we have a native directory handle (or can open one)
     if (inputDirHandleRef.current) {
       await executeDirectDiskCollection(inputDirHandleRef.current);
@@ -721,6 +864,21 @@ export default function FileCollectorTool() {
   const handleOpenFolder = async () => {
     const target = lastOutputFolder || outputFolder;
     if (!target) return;
+    if (isDesktop()) {
+      try {
+        await (window as any).electronAPI.fs.openPath(target);
+        setAlertNotice({
+          type: "info",
+          text: `Opened "${target}" in Windows File Explorer.`
+        });
+      } catch (e: any) {
+        setAlertNotice({
+          type: "error",
+          text: `Could not open folder: ${e.message}`
+        });
+      }
+      return;
+    }
     try {
       const res = await fetch("/api/collector/open-folder", {
         method: "POST",

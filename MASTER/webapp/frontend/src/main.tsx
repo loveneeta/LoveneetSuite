@@ -11,6 +11,7 @@ import "./pdf-excel.css";
 import ExcelToPptTool from "./ExcelToPptTool";
 import PptExcelTool from "./PptExcelTool";
 import FileCollectorTool from "./FileCollectorTool";
+import { isDesktop, storageAdapter, syncService } from "./services/platform";
 
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -58,7 +59,22 @@ function PdfExcelTool(){
  const [files,setFiles]=useState<File[]>([]),[rows,setRows]=useState<RowData[]>([]),[status,setStatus]=useState(""),[busy,setBusy]=useState(false),[done,setDone]=useState(false);
  const reviewCount=useMemo(()=>rows.filter(r=>r.confidence==="review").length,[rows]);
  const addFiles=(list:FileList|null)=>{if(!list)return;setFiles(prev=>[...prev,...Array.from(list).filter(f=>f.type==="application/pdf"||f.name.toLowerCase().endsWith(".pdf"))]);setDone(false);};
- const convert=async()=>{if(!files.length)return;setBusy(true);setRows([]);setDone(false);try{const all:RowData[]=[];for(const file of files){const text=await pdfText(file,setStatus),parsed=parseText(text,file.name);if(!parsed.length)all.push({...blank(file.name),confidence:"review"});else all.push(...parsed);}setRows(all);setDone(true);setStatus("Finished: "+all.length+" item rows extracted.");}catch(e:any){setStatus("Conversion failed: "+(e?.message||"Unknown error"));}finally{setBusy(false);}};
+ const convert=async()=>{if(!files.length)return;setBusy(true);setRows([]);setDone(false);try{const all:RowData[]=[];for(const file of files){const text=await pdfText(file,setStatus),parsed=parseText(text,file.name);if(!parsed.length)all.push({...blank(file.name),confidence:"review"});else all.push(...parsed);}setRows(all);setDone(true);setStatus("Finished: "+all.length+" item rows extracted.");
+for(const r of all){
+  storageAdapter.savePoRecord({
+    sourceFile: r.source,
+    soNumber: r.SO,
+    itemCode: r.ITEM,
+    qty: r.QTY,
+    length: r.L,
+    width: r.W,
+    height: r.H,
+    ply: r.PLY,
+    boxType: r.TYPE,
+    confidence: r.confidence,
+    rawPayload: r
+  });
+}}catch(e:any){setStatus("Conversion failed: "+(e?.message||"Unknown error"));}finally{setBusy(false);}};
  const updateRow=(idx:number,key:string,value:string)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[key]:value,confidence:"review"}:r));
  const makeWorkbook=async(data:RowData[],title:string)=>{const wb=new ExcelJS.Workbook();wb.creator="PDF to Excel Converter";const ws=wb.addWorksheet("Bulk Calculation Template");ws.addRow([...IMPORT_HEADERS]);data.forEach(r=>{const values=getTemplateValues(r);ws.addRow(IMPORT_HEADERS.map(h=>values[h]??""));});ws.views=[{state:"frozen",ySplit:1}];ws.autoFilter={from:"A1",to:"AA"+(data.length+1)};ws.getRow(1).font={bold:true,color:{argb:"FFFFFFFF"}};ws.getRow(1).fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF2678B8"}};ws.getRow(1).alignment={horizontal:"center",vertical:"middle",wrapText:true};ws.getRow(1).height=42;[28,22,32,16,15,12,12,12,15,14,14,20,14,20,16,12,12,12,26,16,16,18,16,18,14,20,48].forEach((w,i)=>ws.getColumn(i+1).width=w);const buf=await wb.xlsx.writeBuffer();saveAs(new Blob([buf]),title);};
  const exportSeparate=async()=>{for(let i=0;i<files.length;i++){const data=rows.filter(r=>r.source===files[i].name);if(data.length)await makeWorkbook(data,files[i].name.replace(/\.pdf$/i,"")+".xlsx");}};
@@ -81,6 +97,32 @@ function PdfExcelTool(){
 const tools = [{id:"dashboard",name:"Overview",icon:LayoutDashboard},{id:"collector",name:"File Collector",icon:FolderSync},{id:"convert",name:"Image Converter",icon:Images},{id:"organize",name:"Image Organizer",icon:FolderTree},{id:"ppt",name:"PowerPoint Exporter",icon:Presentation},{id:"pdf-excel",name:"PO PDF to Excel",icon:FileSpreadsheet},{id:"excel-ppt",name:"Excel to Catalogue PPT",icon:Presentation},{id:"ppt-excel",name:"PPT to Excel with Images",icon:Presentation}];
 function App(){
  const [page,setPage]=useState("dashboard"),[mobile,setMobile]=useState(false),[busy,setBusy]=useState(false),[notice,setNotice]=useState(null);
+ const [isOnline,setIsOnline]=useState(typeof navigator!=="undefined"?navigator.onLine:true);
+ const [showSettingsModal,setShowSettingsModal]=useState(false);
+ const [dbStats,setDbStats]=useState<any>(null);
+ React.useEffect(()=>{
+   const onOn=()=>setIsOnline(true), onOff=()=>setIsOnline(false);
+   window.addEventListener("online",onOn);
+   window.addEventListener("offline",onOff);
+   return ()=>{ window.removeEventListener("online",onOn); window.removeEventListener("offline",onOff); };
+ },[]);
+ const openSettings=async()=>{
+   const stats=await storageAdapter.getStats();
+   setDbStats(stats);
+   setShowSettingsModal(true);
+ };
+ const handleBackup=async()=>{
+   const res=await storageAdapter.backupDatabase();
+   if(res.success){ setNotice({type:"success",text:"Database backup saved successfully!"}); }
+ };
+ const handleRestore=async()=>{
+   const res=await storageAdapter.restoreDatabase();
+   if(res.success){
+     const stats=await storageAdapter.getStats();
+     setDbStats(stats);
+     setNotice({type:"success",text:"Database restored successfully!"});
+   }
+ };
  const [images,setImages]=useState([]),[format,setFormat]=useState("jpg"),[quality,setQuality]=useState(90),[width,setWidth]=useState(""),[height,setHeight]=useState("");
  const [excel,setExcel]=useState([]),[archive,setArchive]=useState([]),[mode,setMode]=useState("2");
  const [ppts,setPpts]=useState([]),[jpg,setJpg]=useState(true),[png,setPng]=useState(false),[webp,setWebp]=useState(true),[pq,setPq]=useState(95);
@@ -92,14 +134,68 @@ function App(){
  function organize(e){e.preventDefault();if(!excel[0]||!archive[0])return setNotice({type:"error",text:"Choose an Excel workbook and an images ZIP archive."});const d=new FormData();d.append("excel",excel[0]);d.append("image_archive",archive[0]);d.append("mode",mode);run("/api/organize",d,"organized_images.zip")}
  function exportPpt(e){e.preventDefault();if(!ppts.length)return setNotice({type:"error",text:"Choose at least one PowerPoint file."});const d=new FormData();ppts.forEach(f=>d.append("files",f));d.append("export_jpg",String(jpg));d.append("export_png",String(png));d.append("export_webp",String(webp));d.append("quality",String(pq));run("/api/ppt-export",d,"powerpoint_exports.zip")}
  function nav(id){setPage(id);setMobile(false);setNotice(null)}
- return <div className="app-shell">{mobile&&<button className="scrim" onClick={()=>setMobile(false)}/>}<aside className={"sidebar "+(mobile?"open":"")}><div className="brand"><div className="brand-mark">L<span>.</span></div><div><strong>LOVENEET</strong><small>BUSINESS SUITE</small></div><button className="mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div><div className="nav-label">WORKSPACE</div><nav>{tools.map(t=><button key={t.id} className={"nav-item "+(page===t.id?"active":"")} onClick={()=>nav(t.id)}><t.icon size={18}/><span>{t.name}</span></button>)}</nav><div className="sidebar-bottom"><div className="secure-note"><Sparkles size={16}/><div><strong>Made for your workflow</strong><small>Web edition · local server</small></div></div><button className="nav-item" onClick={()=>setNotice({type:"info",text:"Configure server options in the webapp README."})}><Settings size={18}/><span>Settings</span></button><div className="version">WEB EDITION · 1.1</div></div></aside>
- <main className="main-area"><header className="topbar"><button className="mobile-menu" onClick={()=>setMobile(true)}><Menu size={20}/></button><div className="breadcrumb">Loveneet Suite <span>/</span> <strong>{active.name}</strong></div><div className="top-status"><span className="status-dot"/> Web workspace</div></header><div className="page-wrap"><div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{page==="dashboard"?"Good work starts here.":active.name}</h1><p>{page==="dashboard"?"Your product, purchasing and presentation tools, together in one place.":"Upload files, choose settings, and download your results."}</p></div><div className="heading-mark"><Sparkles size={22}/></div></div>
+ return <div className="app-shell">{mobile&&<button className="scrim" onClick={()=>setMobile(false)}/>}<aside className={"sidebar "+(mobile?"open":"")}><div className="brand"><div className="brand-mark">L<span>.</span></div><div><strong>LOVENEET</strong><small>BUSINESS SUITE</small></div><button className="mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div><div className="nav-label">WORKSPACE</div><nav>{tools.map(t=><button key={t.id} className={"nav-item "+(page===t.id?"active":"")} onClick={()=>nav(t.id)}><t.icon size={18}/><span>{t.name}</span></button>)}</nav><div className="sidebar-bottom"><div className="secure-note"><Sparkles size={16}/><div><strong>Made for your workflow</strong><small>Web edition · local server</small></div></div><button className="nav-item" onClick={openSettings}><Settings size={18}/><span>Settings & Database</span></button><div className="version">WEB EDITION · 1.1</div></div></aside>
+ <main className="main-area"><header className="topbar"><button className="mobile-menu" onClick={()=>setMobile(true)}><Menu size={20}/></button><div className="breadcrumb">Loveneet Suite <span>/</span> <strong>{active.name}</strong></div>{isDesktop() ? (
+  <div className={"top-status " + (isOnline ? "online" : "offline")}>
+    <span className={"status-dot " + (isOnline ? "online" : "offline")}/>
+    {isOnline ? "Desktop · Online" : "Desktop · Offline (Local Mode)"}
+  </div>
+) : (
+  <div className={"top-status " + (isOnline ? "" : "offline")}>
+    <span className={"status-dot " + (isOnline ? "" : "offline")}/>
+    {isOnline ? "Web workspace" : "Web (Offline)"}
+  </div>
+)}</header><div className="page-wrap"><div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{page==="dashboard"?"Good work starts here.":active.name}</h1><p>{page==="dashboard"?"Your product, purchasing and presentation tools, together in one place.":"Upload files, choose settings, and download your results."}</p></div><div className="heading-mark"><Sparkles size={22}/></div></div>
  {notice&&<div className={"notice "+notice.type}><span>{notice.type==="success"?<CheckCircle2 size={19}/>:<AlertCircle size={19}/>}</span><p>{notice.text}</p><button onClick={()=>setNotice(null)}><X size={16}/></button></div>}
  {page==="pdf-excel"&&<PdfExcelTool/>}{page==="excel-ppt"&&<ExcelToPptTool/>}{page==="ppt-excel"&&<PptExcelTool/>}{page==="collector"&&<FileCollectorTool/>}
  {page==="dashboard"&&<><section className="welcome-card"><div><div className="welcome-pill"><span className="status-dot"/> WORKSPACE READY</div><h2>From product files<br/>to <em>presentation-ready.</em></h2><p>Choose a tool to start. Files upload only when you run a task.</p><button className="primary-btn" onClick={()=>nav("convert")}>Convert images <Images size={17}/></button></div><div className="art-orbit"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="orbit-core"><Images size={42}/></div><div className="float-chip chip-one"><FileSpreadsheet size={17}/></div><div className="float-chip chip-two"><Presentation size={17}/></div><div className="float-chip chip-three"><FolderTree size={17}/></div></div></section><div className="section-head"><div><h2>Tools</h2><p>Choose a workflow to get started</p></div><span className="tool-count">07 TOOLS</span></div><section className="tool-grid">{tools.filter(t=>t.id!=="dashboard").map((t,i)=><button className="tool-card" key={t.id} onClick={()=>nav(t.id)}><div className={"tool-icon tone-"+(i%3)}><t.icon size={22}/></div><span className="card-arrow">↗</span><h3>{t.name}</h3><p>{({"convert":"Batch convert and resize product images","organize":"Organize images using Excel product data","ppt":"Export presentation slides as images","pdf-excel":"Extract purchase-order and quotation rows into a 27-column Excel template","excel-ppt":"Generate product catalogue slides from Excel data and embedded images","ppt-excel":"Extract presentation text, tables and images into a custom Excel workbook","collector":"Flatten nested folders and collect files with subfolder prefix naming"} as Record<string,string>)[t.id]}</p><span className="open-tool">Open tool →</span></button>)}</section><div className="privacy-foot"><span><CheckCircle2 size={16}/> PDF extraction runs locally in your browser</span><span>LOVENEET SUITE</span></div></>}
  {page==="convert"&&<form className="workspace-grid" onSubmit={convert}><section className="panel"><div className="panel-title"><span className="step">01</span><div><h2>Choose images</h2><p>Select one or more images from your device.</p></div></div>{picker("Choose image files","image/*",true,images,setImages,"JPG, PNG, WEBP, BMP, TIFF")}</section><section className="panel"><div className="panel-title"><span className="step">02</span><div><h2>Conversion settings</h2><p>Choose the output format and quality.</p></div></div><div className="form-grid">{field("Output format",<select value={format} onChange={e=>setFormat(e.target.value)}><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WEBP</option><option value="bmp">BMP</option><option value="tiff">TIFF</option></select>)}{field("Quality",<div className="range-line"><input type="range" min="10" max="100" value={quality} onChange={e=>setQuality(+e.target.value)}/><strong>{quality}%</strong></div>)}{field("Resize width (px)",<input type="number" min="1" max="12000" placeholder="Original" value={width} onChange={e=>setWidth(e.target.value)}/>)}{field("Resize height (px)",<input type="number" min="1" max="12000" placeholder="Original" value={height} onChange={e=>setHeight(e.target.value)}/>)}</div><div className="hint-box">Enter both dimensions to resize. Leave both blank to preserve original dimensions.</div></section><div className="action-bar"><span>{images.length} image file(s) selected</span><button className="primary-btn" disabled={busy}>{busy?"Processing…":"Convert & download ZIP"} <Download size={17}/></button></div></form>}
  {page==="organize"&&<form className="workspace-grid" onSubmit={organize}><section className="panel"><div className="panel-title"><span className="step">01</span><div><h2>Product spreadsheet</h2><p>Upload your Excel product data and image paths.</p></div></div>{picker("Choose Excel workbook",".xlsx,.xlsm",false,excel,setExcel,"XLSX or XLSM")}</section><section className="panel"><div className="panel-title"><span className="step">02</span><div><h2>Source images archive</h2><p>Zip your source image folder before uploading.</p></div></div>{picker("Choose images ZIP",".zip,application/zip",false,archive,setArchive,"Image filenames must match paths in Excel")}</section><section className="panel full-panel"><div className="panel-title"><span className="step">03</span><div><h2>Folder structure</h2><p>Select the sorting strategy.</p></div></div><div className="mode-options">{[["1","Nested folders","Use Excel columns G to Q."],["2","KEEP / DELETE + collection","Sort into KEEP or DELETE, then collection."],["3","KEEP / DELETE + custom levels","Sort into KEEP or DELETE, then column H."]].map(m=><label key={m[0]} className={"mode-option "+(mode===m[0]?"selected":"")}><input type="radio" value={m[0]} checked={mode===m[0]} onChange={e=>setMode(e.target.value)}/><span className="radio-dot"/><span><strong>{m[1]}</strong><small>{m[2]}</small></span></label>)}</div><div className="hint-box">This first migration uses the desktop app’s default Excel column mapping. Images are copied into folders and packaged for download; originals are not deleted.</div></section><div className="action-bar"><span>Output is a downloadable ZIP</span><button className="primary-btn" disabled={busy}>{busy?"Organizing…":"Organize & download ZIP"} <Download size={17}/></button></div></form>}
  {page==="ppt"&&<form className="workspace-grid" onSubmit={exportPpt}><section className="panel"><div className="panel-title"><span className="step">01</span><div><h2>Choose presentations</h2><p>Upload PowerPoint files.</p></div></div>{picker("Choose PowerPoint files",".ppt,.pptx",true,ppts,setPpts,"PPT / PPTX · LibreOffice required on server")}</section><section className="panel"><div className="panel-title"><span className="step">02</span><div><h2>Export formats</h2><p>Select output formats.</p></div></div><div className="check-options"><label><input type="checkbox" checked={jpg} onChange={e=>setJpg(e.target.checked)}/> High-quality JPG</label><label><input type="checkbox" checked={png} onChange={e=>setPng(e.target.checked)}/> PNG</label><label><input type="checkbox" checked={webp} onChange={e=>setWebp(e.target.checked)}/> WEBP</label></div>{field("WEBP quality",<div className="range-line"><input type="range" min="10" max="100" value={pq} onChange={e=>setPq(+e.target.value)}/><strong>{pq}%</strong></div>)}<div className="hint-box">Slide rendering runs on the server using LibreOffice and PyMuPDF. Text before a “|” may be used as a filename.</div></section><div className="action-bar"><span>{ppts.length} presentation(s) selected</span><button className="primary-btn" disabled={busy}>{busy?"Exporting…":"Export slides & download ZIP"} <Download size={17}/></button></div></form>}
- <footer className="footer"><span>Loveneet Suite · Web Edition</span><span>Built for product workflows</span></footer></div></main></div>
+ <footer className="footer">
+  <span>Loveneet Suite · {isDesktop() ? "Windows Desktop Edition" : "Web Edition"}</span>
+  <span>Built for product workflows · Offline-first</span>
+</footer>
+{showSettingsModal && (
+  <div className="collector-modal-backdrop" onClick={()=>setShowSettingsModal(false)}>
+    <div className="collector-modal" style={{maxWidth:540}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <h3><Settings size={20} color="#38bdf8"/> Application Settings & Local Database</h3>
+        <button type="button" onClick={()=>setShowSettingsModal(false)} style={{background:"none",border:"none",color:"#94a3b8",cursor:"pointer"}}><X size={18}/></button>
+      </div>
+      <div style={{fontSize:13,color:"#cbd5e1",display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{background:"#141e33",border:"1px solid #1e293b",borderRadius:8,padding:12}}>
+          <strong>Platform Runtime:</strong> {isDesktop() ? "Windows Desktop Application (Electron + SQLite)" : "Web Browser (Vercel)"}
+          <br/>
+          <strong>Connectivity Status:</strong> {isOnline ? "Online — Connected" : "Offline — Local Mode"}
+        </div>
+        {dbStats && (
+          <div style={{background:"#141e33",border:"1px solid #1e293b",borderRadius:8,padding:12}}>
+            <strong>Local SQLite Database:</strong>
+            <div style={{fontSize:11.5,color:"#94a3b8",fontFamily:"monospace",marginTop:4,wordBreak:"break-all"}}>
+              {dbStats.path || dbStats.storageType}
+            </div>
+            {dbStats.tables && (
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:8,fontSize:12}}>
+                {Object.entries(dbStats.tables).map(([t,c])=>(
+                  <div key={t} style={{color:"#94a3b8"}}>• {t}: <strong style={{color:"#f8fafc"}}>{String(c)}</strong></div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{display:"flex",gap:10,marginTop:6}}>
+          {isDesktop() && (
+            <>
+              <button type="button" className="collector-btn-secondary" onClick={handleBackup}><Download size={15}/> Backup Database</button>
+              <button type="button" className="collector-btn-secondary" onClick={handleRestore}><Upload size={15}/> Restore Database</button>
+            </>
+          )}
+          <button type="button" className="collector-btn-primary" style={{marginLeft:"auto"}} onClick={()=>setShowSettingsModal(false)}>Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+)}</div></main></div>
 }
 createRoot(document.getElementById("root")).render(<App/>);

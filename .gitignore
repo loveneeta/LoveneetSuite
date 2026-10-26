@@ -26,6 +26,10 @@ ENV/
 # Node / Web
 node_modules/
 dist/
+dist-electron/
+*.exe
+*.blockmap
+*.7z
 .vite/
 npm-debug.log*
 yarn-debug.log*
