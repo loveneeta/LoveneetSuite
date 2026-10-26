@@ -17,11 +17,7 @@ import {
   Layers,
   Sparkles,
   RefreshCw,
-  FileCheck2,
   Sliders,
-  Maximize2,
-  Percent,
-  Minimize2,
   Zap,
   HardDrive
 } from "lucide-react";
@@ -71,8 +67,100 @@ interface CompressionStats {
   saved_pct: number;
 }
 
+// Client-side image compression using Canvas
+async function compressImageInBrowser(
+  file: File,
+  options: {
+    mode: "reduce" | "target" | "resize";
+    targetBytes: number;
+    quality: number;
+    resizeMode: "original" | "custom" | "scale";
+    maxWidth?: number;
+    maxHeight?: number;
+    scalePct?: number;
+    preserveAspect?: boolean;
+    outputFormat: "original" | "jpg" | "png" | "webp";
+    skipBelowTarget?: boolean;
+  }
+): Promise<{ blob: Blob; status: "compressed" | "skipped" | "preserved" | "failed" }> {
+  if (options.skipBelowTarget && file.size <= options.targetBytes && options.mode === "target") {
+    return { blob: file, status: "skipped" };
+  }
+
+  try {
+    const bmp = await createImageBitmap(file);
+    let w = bmp.width;
+    let h = bmp.height;
+
+    if (options.resizeMode === "scale" && options.scalePct && options.scalePct < 100) {
+      w = Math.max(1, Math.floor(w * (options.scalePct / 100)));
+      h = Math.max(1, Math.floor(h * (options.scalePct / 100)));
+    } else if (options.resizeMode === "custom" && (options.maxWidth || options.maxHeight)) {
+      const mw = options.maxWidth || w;
+      const mh = options.maxHeight || h;
+      if (options.preserveAspect) {
+        const ratio = Math.min(mw / w, mh / h);
+        w = Math.max(1, Math.floor(w * ratio));
+        h = Math.max(1, Math.floor(h * ratio));
+      } else {
+        w = mw;
+        h = mh;
+      }
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { blob: file, status: "failed" };
+
+    let mime = "image/jpeg";
+    if (options.outputFormat === "png") mime = "image/png";
+    else if (options.outputFormat === "webp") mime = "image/webp";
+    else if (options.outputFormat === "original") {
+      if (file.type === "image/png") mime = "image/png";
+      else if (file.type === "image/webp") mime = "image/webp";
+      else mime = "image/jpeg";
+    }
+
+    if (mime === "image/jpeg") {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.drawImage(bmp, 0, 0, w, h);
+
+    const getBlob = (q: number) =>
+      new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, q));
+
+    let resBlob: Blob | null = null;
+    if (options.mode === "target" && options.targetBytes > 0) {
+      let q = options.quality / 100;
+      resBlob = await getBlob(q);
+      if (resBlob && resBlob.size > options.targetBytes) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          q = Math.max(0.15, q - 0.2);
+          const trial = await getBlob(q);
+          if (trial) {
+            resBlob = trial;
+            if (trial.size <= options.targetBytes) break;
+          }
+        }
+      }
+    } else {
+      resBlob = await getBlob(options.quality / 100);
+    }
+
+    if (!resBlob || resBlob.size >= file.size) {
+      return { blob: file, status: "preserved" };
+    }
+    return { blob: resBlob, status: "compressed" };
+  } catch (e) {
+    return { blob: file, status: "failed" };
+  }
+}
+
 export default function FileCollectorTool() {
-  // Mode: "desktop" (FastAPI local filesystem) or "browser" (HTML5 webkitdirectory / JSZip)
+  // Mode: "desktop" (Direct Disk / Local) or "browser" (Dropzone Upload / ZIP)
   const [activeTab, setActiveTab] = useState<"desktop" | "browser">("desktop");
 
   // Input & Output Folder Paths
@@ -105,7 +193,7 @@ export default function FileCollectorTool() {
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [searchFilter, setSearchFilter] = useState<string>("");
 
-  // Collection & Compression Execution State
+  // Collection Execution State
   const [isCollecting, setIsCollecting] = useState<boolean>(false);
   const [collectProgress, setCollectProgress] = useState<{
     copied: number;
@@ -120,7 +208,7 @@ export default function FileCollectorTool() {
   const [lastOutputFolder, setLastOutputFolder] = useState<string>("");
   const [compressionStats, setCompressionStats] = useState<CompressionStats | null>(null);
 
-  // Status Alerts
+  // Status Notice
   const [alertNotice, setAlertNotice] = useState<{
     type: "success" | "error" | "info";
     text: string;
@@ -129,9 +217,11 @@ export default function FileCollectorTool() {
   // Overwrite Confirmation Modal
   const [showOverwriteModal, setShowOverwriteModal] = useState<boolean>(false);
 
-  // Browser Mode Files
-  const [browserFiles, setBrowserFiles] = useState<File[]>([]);
+  // Native File System Directory Handles for direct disk read/write
+  const inputDirHandleRef = useRef<any>(null);
+  const outputDirHandleRef = useRef<any>(null);
   const cancelRequestedRef = useRef<boolean>(false);
+  const [browserFiles, setBrowserFiles] = useState<File[]>([]);
 
   // Helper to suggest default output directory
   const handleInputChange = (val: string) => {
@@ -155,14 +245,18 @@ export default function FileCollectorTool() {
   const handlePickDirectory = async (forTarget: "input" | "output") => {
     if ("showDirectoryPicker" in window) {
       try {
-        const dirHandle = await (window as any).showDirectoryPicker();
+        const dirHandle = await (window as any).showDirectoryPicker({
+          mode: "readwrite"
+        });
         if (forTarget === "input") {
+          inputDirHandleRef.current = dirHandle;
           handleInputChange(dirHandle.name);
           setAlertNotice({
             type: "info",
-            text: `Selected folder: "${dirHandle.name}". If running with the local server, you can also paste the full local path (e.g. C:\\Users\\...\\${dirHandle.name}).`
+            text: `Selected folder: "${dirHandle.name}". Click "Scan Files" or "Start Collection" to process directly on your disk.`
           });
         } else {
+          outputDirHandleRef.current = dirHandle;
           setOutputFolder(dirHandle.name);
         }
       } catch (err: any) {
@@ -191,16 +285,129 @@ export default function FileCollectorTool() {
     skip_below_target: skipBelowTarget
   });
 
-  // Scan files via backend API
-  const handleScanDesktop = async () => {
-    if (!inputFolder.trim()) {
-      setAlertNotice({ type: "error", text: "Please enter or select an input folder path." });
-      return;
+  // Scan files from Directory Handle
+  const scanFromDirectoryHandle = async (dirHandle: any) => {
+    const items: ScannedFileItem[] = [];
+    const usedNames = new Set<string>();
+    let dups = 0;
+    let imgs = 0;
+
+    const imgExts = new Set([
+      "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "gif", "ico", "heic", "heif", "avif"
+    ]);
+
+    async function walk(currentHandle: any, currentPathParts: string[]) {
+      for await (const entry of currentHandle.values()) {
+        if (entry.name === "Collected_Files") continue;
+        if (!includeHidden && entry.name.startsWith(".")) continue;
+
+        if (entry.kind === "file") {
+          try {
+            const file: File = await entry.getFile();
+            const ext = file.name.lastIndexOf(".") !== -1 ? file.name.substring(file.name.lastIndexOf(".") + 1).toLowerCase() : "";
+            const isImg = imgExts.has(ext);
+            if (isImg) imgs++;
+
+            let filename = file.name;
+            if (enableCompression && isImg && outputFormat !== "original") {
+              const stem = filename.lastIndexOf(".") !== -1 ? filename.substring(0, filename.lastIndexOf(".")) : filename;
+              filename = `${stem}.${outputFormat}`;
+            }
+
+            let baseName = filename;
+            if (prefixSubfolders && currentPathParts.length > 0) {
+              baseName = `${currentPathParts.join("-")}-${filename}`;
+            }
+
+            const stem = baseName.lastIndexOf(".") !== -1 ? baseName.substring(0, baseName.lastIndexOf(".")) : baseName;
+            const finalExt = baseName.lastIndexOf(".") !== -1 ? baseName.substring(baseName.lastIndexOf(".")) : "";
+
+            const lower = baseName.toLowerCase();
+            let targetName = baseName;
+            let status: ScannedFileItem["status"] = "eligible";
+
+            if (!usedNames.has(lower)) {
+              usedNames.add(lower);
+            } else {
+              dups++;
+              if (duplicateMode === "skip") {
+                status = "duplicate_skipped";
+              } else if (duplicateMode === "overwrite") {
+                status = "overwrite";
+              } else {
+                let i = 1;
+                while (true) {
+                  const cand = `${stem} (${i})${finalExt}`;
+                  if (!usedNames.has(cand.toLowerCase())) {
+                    usedNames.add(cand.toLowerCase());
+                    targetName = cand;
+                    status = "duplicate_renamed";
+                    break;
+                  }
+                  i++;
+                }
+              }
+            }
+
+            const relPath = [...currentPathParts, file.name].join("/");
+            items.push({
+              source_path: relPath,
+              relative_path: relPath,
+              target_filename: targetName,
+              size: file.size,
+              status,
+              is_image: isImg,
+              fileBlob: file
+            });
+          } catch (e) {}
+        } else if (entry.kind === "directory" && includeSubfolders) {
+          await walk(entry, [...currentPathParts, entry.name]);
+        }
+      }
     }
 
+    await walk(dirHandle, []);
+    setScannedFiles(items);
+    setTotalFound(items.length);
+    setTotalImages(imgs);
+    setTotalDuplicates(dups);
+    return items;
+  };
+
+  // Scan files handler
+  const handleScanDesktop = async () => {
     setIsScanning(true);
     setAlertNotice(null);
     setCollectionDone(false);
+
+    // If browser holds a native DirectoryHandle
+    if (inputDirHandleRef.current) {
+      try {
+        const items = await scanFromDirectoryHandle(inputDirHandleRef.current);
+        setAlertNotice({
+          type: "success",
+          text: `Scan complete: Found ${items.length} file(s) directly on your disk. Ready to collect.`
+        });
+      } catch (err: any) {
+        setAlertNotice({ type: "error", text: `Scan failed: ${err.message}` });
+      } finally {
+        setIsScanning(false);
+      }
+      return;
+    }
+
+    // Otherwise, check if user provided a path
+    if (!inputFolder.trim()) {
+      setIsScanning(false);
+      if ("showDirectoryPicker" in window) {
+        await handlePickDirectory("input");
+      } else {
+        setAlertNotice({ type: "error", text: "Please enter or browse an input folder." });
+      }
+      return;
+    }
+
+    // Try backend API scan
     try {
       const res = await fetch("/api/collector/scan", {
         method: "POST",
@@ -218,6 +425,15 @@ export default function FileCollectorTool() {
       });
 
       if (!res.ok) {
+        // If 405 or 400 because cloud server doesn't have local drive
+        if ("showDirectoryPicker" in window) {
+          setAlertNotice({
+            type: "info",
+            text: "Opening directory picker so your browser can access this folder directly..."
+          });
+          await handlePickDirectory("input");
+          return;
+        }
         let msg = `Scan failed (Status ${res.status})`;
         try {
           const err = await res.json();
@@ -236,13 +452,17 @@ export default function FileCollectorTool() {
       }
       setAlertNotice({
         type: "success",
-        text: `Scan complete: Found ${data.total_found} file(s) (${data.total_images} images, ${data.total_non_images} other files). Ready to collect.`
+        text: `Scan complete: Found ${data.total_found} file(s). Ready to collect.`
       });
     } catch (err: any) {
-      setAlertNotice({
-        type: "error",
-        text: err.message || "Failed to scan folder. Ensure the backend server is running and folder path is correct."
-      });
+      if ("showDirectoryPicker" in window) {
+        setAlertNotice({
+          type: "info",
+          text: "To process your local drive in the web browser, click 'Browse' to grant folder access."
+        });
+      } else {
+        setAlertNotice({ type: "error", text: err.message || "Failed to scan folder." });
+      }
     } finally {
       setIsScanning(false);
     }
@@ -257,13 +477,165 @@ export default function FileCollectorTool() {
     await executeCollection();
   };
 
+  // Direct Disk Collection using File System Access API
+  const executeDirectDiskCollection = async (dirHandle: any) => {
+    setIsCollecting(true);
+    cancelRequestedRef.current = false;
+    setCollectionDone(false);
+    setCollectionErrors([]);
+
+    let filesToCollect = scannedFiles;
+    if (filesToCollect.length === 0) {
+      filesToCollect = await scanFromDirectoryHandle(dirHandle);
+    }
+
+    if (filesToCollect.length === 0) {
+      setIsCollecting(false);
+      setAlertNotice({ type: "error", text: "No eligible files found to collect." });
+      return;
+    }
+
+    try {
+      // 1. Get or create output folder handle
+      let outHandle = outputDirHandleRef.current;
+      if (!outHandle) {
+        outHandle = await dirHandle.getDirectoryHandle("Collected_Files", { create: true });
+      }
+
+      let copied = 0;
+      let skipped = 0;
+      let failed = 0;
+      let compCount = 0;
+      let origBytes = 0;
+      let finalBytes = 0;
+      let nonImgs = 0;
+      const errorsList: Array<{ file: string; error: string }> = [];
+
+      const targetBytesVal =
+        targetUnit === "MB" ? targetSize * 1024 * 1024 : targetSize * 1024;
+
+      for (let i = 0; i < filesToCollect.length; i++) {
+        if (cancelRequestedRef.current) break;
+        const item = filesToCollect[i];
+
+        if (item.status === "duplicate_skipped") {
+          skipped++;
+          continue;
+        }
+        if (!item.fileBlob) {
+          failed++;
+          continue;
+        }
+
+        origBytes += item.fileBlob.size;
+        let blobToSave: Blob = item.fileBlob;
+
+        try {
+          if (enableCompression && item.is_image) {
+            const compRes = await compressImageInBrowser(item.fileBlob, {
+              mode: compressionMode,
+              targetBytes: targetBytesVal,
+              quality,
+              resizeMode,
+              maxWidth: maxWidth ? parseInt(maxWidth, 10) : undefined,
+              maxHeight: maxHeight ? parseInt(maxHeight, 10) : undefined,
+              scalePct,
+              preserveAspect,
+              outputFormat,
+              skipBelowTarget
+            });
+            blobToSave = compRes.blob;
+            if (compRes.status === "compressed") compCount++;
+          } else if (!item.is_image) {
+            nonImgs++;
+          }
+
+          finalBytes += blobToSave.size;
+
+          // Write file directly to local disk
+          const destFileHandle = await outHandle.getFileHandle(item.target_filename, {
+            create: true
+          });
+          const writable = await destFileHandle.createWritable();
+          await writable.write(blobToSave);
+          await writable.close();
+
+          copied++;
+        } catch (copyErr: any) {
+          failed++;
+          errorsList.push({ file: item.relative_path, error: copyErr.message || "Failed to write file" });
+        }
+
+        const pct = Math.round(((i + 1) / filesToCollect.length) * 100);
+        setCollectProgress({
+          copied,
+          skipped,
+          failed,
+          total: filesToCollect.length,
+          currentFile: item.target_filename,
+          percent: pct
+        });
+      }
+
+      setCollectionErrors(errorsList);
+      setLastOutputFolder(`${dirHandle.name}/Collected_Files`);
+
+      if (enableCompression) {
+        setCompressionStats({
+          enabled: true,
+          total_images: totalImages,
+          compressed: compCount,
+          skipped: totalImages - compCount,
+          unsupported: 0,
+          non_images: nonImgs,
+          orig_bytes: origBytes,
+          final_bytes: finalBytes,
+          saved_bytes: Math.max(0, origBytes - finalBytes),
+          saved_pct: origBytes > 0 ? Math.round(((origBytes - finalBytes) / origBytes) * 100) : 0
+        });
+      }
+
+      setCollectionDone(true);
+      setAlertNotice({
+        type: "success",
+        text: `Collection finished! ${copied} file(s) saved directly into "Collected_Files" on your disk.`
+      });
+    } catch (err: any) {
+      setAlertNotice({
+        type: "error",
+        text: `Direct disk collection failed: ${err.message}`
+      });
+    } finally {
+      setIsCollecting(false);
+    }
+  };
+
   const executeCollection = async () => {
     setShowOverwriteModal(false);
+
+    // If we have a native directory handle (or can open one)
+    if (inputDirHandleRef.current) {
+      await executeDirectDiskCollection(inputDirHandleRef.current);
+      return;
+    }
+
     if (!inputFolder.trim()) {
+      if ("showDirectoryPicker" in window) {
+        try {
+          const dirHandle = await (window as any).showDirectoryPicker({ mode: "readwrite" });
+          inputDirHandleRef.current = dirHandle;
+          setInputFolder(dirHandle.name);
+          await executeDirectDiskCollection(dirHandle);
+          return;
+        } catch (e) {
+          return;
+        }
+      }
       setAlertNotice({ type: "error", text: "Please specify an input folder." });
       return;
     }
 
+    // Server-side Collection
     setIsCollecting(true);
     cancelRequestedRef.current = false;
     setCollectionDone(false);
@@ -274,7 +646,7 @@ export default function FileCollectorTool() {
       skipped: 0,
       failed: 0,
       total: totalFound || scannedFiles.length || 1,
-      currentFile: enableCompression ? "Scanning & compressing images..." : "Collecting files...",
+      currentFile: enableCompression ? "Compressing & collecting..." : "Collecting files...",
       percent: 15
     });
 
@@ -296,6 +668,18 @@ export default function FileCollectorTool() {
       });
 
       if (!res.ok) {
+        if ("showDirectoryPicker" in window) {
+          setIsCollecting(false);
+          setAlertNotice({
+            type: "info",
+            text: "Cloud server cannot access your local drive directly. Select the folder via the browser picker to save directly to disk."
+          });
+          const dirHandle = await (window as any).showDirectoryPicker({ mode: "readwrite" });
+          inputDirHandleRef.current = dirHandle;
+          setInputFolder(dirHandle.name);
+          await executeDirectDiskCollection(dirHandle);
+          return;
+        }
         let msg = `Collection failed (Status ${res.status})`;
         try {
           const err = await res.json();
@@ -326,14 +710,14 @@ export default function FileCollectorTool() {
     } catch (err: any) {
       setAlertNotice({
         type: "error",
-        text: err.message || "Collection failed. Check folder write permissions."
+        text: err.message || "Collection failed."
       });
     } finally {
       setIsCollecting(false);
     }
   };
 
-  // Open output folder in Windows Explorer
+  // Open output folder
   const handleOpenFolder = async () => {
     const target = lastOutputFolder || outputFolder;
     if (!target) return;
@@ -344,8 +728,7 @@ export default function FileCollectorTool() {
         body: JSON.stringify({ folder: target })
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Could not open folder (Status ${res.status})`);
+        throw new Error("Local folder opener not supported in web mode.");
       }
       setAlertNotice({
         type: "info",
@@ -354,12 +737,12 @@ export default function FileCollectorTool() {
     } catch (err: any) {
       setAlertNotice({
         type: "info",
-        text: `Output directory: ${target}. (Note: opening in Explorer is supported when running the local backend server).`
+        text: `Files are saved in "${target}". You can open this folder directly in your File Explorer.`
       });
     }
   };
 
-  // Export error / processing report
+  // Export report
   const handleExportReport = () => {
     const lines = [
       "==================================================",
@@ -506,7 +889,7 @@ export default function FileCollectorTool() {
     });
   };
 
-  // Browser Mode ZIP export with optional client-side canvas compression
+  // Browser Mode ZIP export
   const handleBrowserZipExport = async () => {
     if (!scannedFiles.length) return;
     setIsCollecting(true);
@@ -518,58 +901,29 @@ export default function FileCollectorTool() {
       let finalBytes = 0;
       let compCount = 0;
 
+      const targetBytesVal = targetUnit === "MB" ? targetSize * 1024 * 1024 : targetSize * 1024;
+
       for (const item of scannedFiles) {
         if (item.status === "duplicate_skipped") continue;
         if (item.fileBlob) {
           origBytes += item.fileBlob.size;
           let blobToSave: Blob = item.fileBlob;
 
-          // If compression enabled and is image, try canvas compression
           if (enableCompression && item.is_image) {
-            try {
-              const bmp = await createImageBitmap(item.fileBlob);
-              let w = bmp.width;
-              let h = bmp.height;
-
-              if (resizeMode === "scale" && scalePct < 100) {
-                w = Math.max(1, Math.floor(w * (scalePct / 100)));
-                h = Math.max(1, Math.floor(h * (scalePct / 100)));
-              } else if (resizeMode === "custom" && (maxWidth || maxHeight)) {
-                const mw = maxWidth ? parseInt(maxWidth, 10) : w;
-                const mh = maxHeight ? parseInt(maxHeight, 10) : h;
-                if (preserveAspect) {
-                  const ratio = Math.min(mw / w, mh / h);
-                  w = Math.max(1, Math.floor(w * ratio));
-                  h = Math.max(1, Math.floor(h * ratio));
-                } else {
-                  w = mw;
-                  h = mh;
-                }
-              }
-
-              const canvas = document.createElement("canvas");
-              canvas.width = w;
-              canvas.height = h;
-              const ctx = canvas.getContext("2d");
-              if (ctx) {
-                ctx.drawImage(bmp, 0, 0, w, h);
-                const mime =
-                  outputFormat === "png"
-                    ? "image/png"
-                    : outputFormat === "webp"
-                    ? "image/webp"
-                    : "image/jpeg";
-                const cBlob = await new Promise<Blob | null>((resolve) =>
-                  canvas.toBlob(resolve, mime, quality / 100)
-                );
-                if (cBlob && cBlob.size < item.fileBlob.size) {
-                  blobToSave = cBlob;
-                  compCount++;
-                }
-              }
-            } catch (cErr) {
-              // Fallback to original
-            }
+            const compRes = await compressImageInBrowser(item.fileBlob, {
+              mode: compressionMode,
+              targetBytes: targetBytesVal,
+              quality,
+              resizeMode,
+              maxWidth: maxWidth ? parseInt(maxWidth, 10) : undefined,
+              maxHeight: maxHeight ? parseInt(maxHeight, 10) : undefined,
+              scalePct,
+              preserveAspect,
+              outputFormat,
+              skipBelowTarget
+            });
+            blobToSave = compRes.blob;
+            if (compRes.status === "compressed") compCount++;
           }
 
           finalBytes += blobToSave.size;
@@ -692,7 +1046,7 @@ export default function FileCollectorTool() {
                 <input
                   type="text"
                   className="collector-input"
-                  placeholder="e.g. C:\Users\Username\Products"
+                  placeholder="Click Browse or enter e.g. D:\MyFolder"
                   value={inputFolder}
                   onChange={(e) => handleInputChange(e.target.value)}
                 />
@@ -716,7 +1070,7 @@ export default function FileCollectorTool() {
                 <input
                   type="text"
                   className="collector-input"
-                  placeholder="e.g. C:\Users\Username\Products\Collected_Files"
+                  placeholder="Defaults to Collected_Files"
                   value={outputFolder}
                   onChange={(e) => setOutputFolder(e.target.value)}
                 />
@@ -898,7 +1252,6 @@ export default function FileCollectorTool() {
 
             {/* Detailed Controls Grid */}
             <div className="compression-settings-grid">
-              {/* Target File Size (Active in Target mode or general) */}
               <div className="collector-field">
                 <label>
                   <span>Target File Size</span>
@@ -924,7 +1277,6 @@ export default function FileCollectorTool() {
                 </div>
               </div>
 
-              {/* Quality Slider */}
               <div className="collector-field">
                 <label>
                   <span>Image Quality</span>
@@ -942,7 +1294,6 @@ export default function FileCollectorTool() {
                 </div>
               </div>
 
-              {/* Resize Mode Selector */}
               <div className="collector-field">
                 <label>
                   <span>Resize Dimensions</span>
@@ -959,7 +1310,6 @@ export default function FileCollectorTool() {
                 </select>
               </div>
 
-              {/* Output Format */}
               <div className="collector-field">
                 <label>
                   <span>Output Format</span>
@@ -978,7 +1328,6 @@ export default function FileCollectorTool() {
               </div>
             </div>
 
-            {/* Conditional Resize Inputs */}
             {resizeMode === "scale" && (
               <div className="collector-field" style={{ maxWidth: 320 }}>
                 <label>
@@ -1023,7 +1372,6 @@ export default function FileCollectorTool() {
               </div>
             )}
 
-            {/* Checkboxes Row */}
             <div style={{ display: "flex", gap: 18, flexWrap: "wrap", paddingTop: 4 }}>
               <label className="collector-toggle">
                 <input
@@ -1067,7 +1415,7 @@ export default function FileCollectorTool() {
               <button
                 type="button"
                 className="collector-btn-secondary"
-                disabled={isScanning || isCollecting || !inputFolder.trim()}
+                disabled={isScanning || isCollecting}
                 onClick={handleScanDesktop}
               >
                 {isScanning ? (
@@ -1087,7 +1435,6 @@ export default function FileCollectorTool() {
               className="collector-btn-primary"
               disabled={
                 isCollecting ||
-                (activeTab === "desktop" && (!inputFolder.trim() || isScanning)) ||
                 (activeTab === "browser" && scannedFiles.length === 0)
               }
               onClick={activeTab === "desktop" ? handleStartCollection : handleBrowserZipExport}
