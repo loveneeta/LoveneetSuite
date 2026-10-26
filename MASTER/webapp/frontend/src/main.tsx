@@ -4,13 +4,14 @@ import ExcelJS from "exceljs";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import Tesseract from "tesseract.js";
-import { Images, FolderTree, Presentation, LayoutDashboard, Upload, Download, CheckCircle2, AlertCircle, Menu, X, Sparkles, FileSpreadsheet, Settings, FileText, Trash2, AlertTriangle, LoaderCircle, Files, LockKeyhole, FolderSync } from "lucide-react";
+import { Images, FolderTree, Presentation, LayoutDashboard, Upload, Download, CheckCircle2, AlertCircle, Menu, X, Sparkles, FileSpreadsheet, Settings, FileText, Trash2, AlertTriangle, LoaderCircle, Files, LockKeyhole, FolderSync, HelpCircle, BookOpen } from "lucide-react";
 const saveAs = (blob: Blob, filename: string) => { const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); };
 import "./style.css";
 import "./pdf-excel.css";
 import ExcelToPptTool from "./ExcelToPptTool";
 import PptExcelTool from "./PptExcelTool";
 import FileCollectorTool from "./FileCollectorTool";
+import UserGuideModal from "./components/UserGuideModal";
 import { isDesktop, storageAdapter, syncService, updateService, UpdateStatus } from "./services/platform";
 
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerUrl;
@@ -99,6 +100,7 @@ function App(){
  const [page,setPage]=useState("dashboard"),[mobile,setMobile]=useState(false),[busy,setBusy]=useState(false),[notice,setNotice]=useState(null);
  const [isOnline,setIsOnline]=useState(typeof navigator!=="undefined"?navigator.onLine:true);
  const [showSettingsModal,setShowSettingsModal]=useState(false);
+ const [showGuideModal,setShowGuideModal]=useState(false);
  const [dbStats,setDbStats]=useState<any>(null);
  const [updateState,setUpdateState]=useState<UpdateStatus|null>(null);
  const [isCheckingUpdate,setIsCheckingUpdate]=useState(false);
@@ -170,7 +172,8 @@ function App(){
  function organize(e){e.preventDefault();if(!excel[0]||!archive[0])return setNotice({type:"error",text:"Choose an Excel workbook and an images ZIP archive."});const d=new FormData();d.append("excel",excel[0]);d.append("image_archive",archive[0]);d.append("mode",mode);run("/api/organize",d,"organized_images.zip")}
  function exportPpt(e){e.preventDefault();if(!ppts.length)return setNotice({type:"error",text:"Choose at least one PowerPoint file."});const d=new FormData();ppts.forEach(f=>d.append("files",f));d.append("export_jpg",String(jpg));d.append("export_png",String(png));d.append("export_webp",String(webp));d.append("quality",String(pq));run("/api/ppt-export",d,"powerpoint_exports.zip")}
  function nav(id){setPage(id);setMobile(false);setNotice(null)}
- return <div className="app-shell">{mobile&&<button className="scrim" onClick={()=>setMobile(false)}/>}<aside className={"sidebar "+(mobile?"open":"")}><div className="brand"><div className="brand-mark">L<span>.</span></div><div><strong>LOVENEET</strong><small>BUSINESS SUITE</small></div><button className="mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div><div className="nav-label">WORKSPACE</div><nav>{tools.map(t=><button key={t.id} className={"nav-item "+(page===t.id?"active":"")} onClick={()=>nav(t.id)}><t.icon size={18}/><span>{t.name}</span></button>)}</nav><div className="sidebar-bottom"><div className="secure-note"><Sparkles size={16}/><div><strong>Made for your workflow</strong><small>Web edition · local server</small></div></div><button className="nav-item" onClick={openSettings}><Settings size={18}/><span>Settings & Database</span></button><div className="version">WEB EDITION · 1.1</div></div></aside>
+ return <div className="app-shell">{mobile&&<button className="scrim" onClick={()=>setMobile(false)}/>}<aside className={"sidebar "+(mobile?"open":"")}><div className="brand"><div className="brand-mark">L<span>.</span></div><div><strong>LOVENEET</strong><small>BUSINESS SUITE</small></div><button className="mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div><div className="nav-label">WORKSPACE</div><nav>{tools.map(t=><button key={t.id} className={"nav-item "+(page===t.id?"active":"")} onClick={()=>nav(t.id)}><t.icon size={18}/><span>{t.name}</span></button>)}</nav><div className="sidebar-bottom"><div className="secure-note"><Sparkles size={16}/><div><strong>Made for your workflow</strong><small>Web edition · local server</small></div></div><button className="nav-item" onClick={()=>setShowGuideModal(true)}><BookOpen size={18}/><span>How to Use (Guide)</span></button>
+<button className="nav-item" onClick={openSettings}><Settings size={18}/><span>Settings & Database</span></button><div className="version">WEB EDITION · 1.1</div></div></aside>
  <main className="main-area"><header className="topbar"><button className="mobile-menu" onClick={()=>setMobile(true)}><Menu size={20}/></button><div className="breadcrumb">Loveneet Suite <span>/</span> <strong>{active.name}</strong></div>{isDesktop() ? (
   <div className={"top-status " + (isOnline ? "online" : "offline")}>
     <span className={"status-dot " + (isOnline ? "online" : "offline")}/>
@@ -181,7 +184,7 @@ function App(){
     <span className={"status-dot " + (isOnline ? "" : "offline")}/>
     {isOnline ? "Web workspace" : "Web (Offline)"}
   </div>
-)}</header><div className="page-wrap"><div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{page==="dashboard"?"Good work starts here.":active.name}</h1><p>{page==="dashboard"?"Your product, purchasing and presentation tools, together in one place.":"Upload files, choose settings, and download your results."}</p></div><div className="heading-mark"><Sparkles size={22}/></div></div>
+)}</header><div className="page-wrap"><div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{page==="dashboard"?"Good work starts here.":active.name}</h1><p>{page==="dashboard"?"Your product, purchasing and presentation tools, together in one place.":"Upload files, choose settings, and download your results."}</p></div><div style={{display:"flex",alignItems:"center",gap:10}}><button type="button" className="help-guide-btn" onClick={()=>setShowGuideModal(true)} title="How to Use & Documentation"><HelpCircle size={16}/><span>How to Use</span></button><div className="heading-mark"><Sparkles size={22}/></div></div></div>
  {notice&&<div className={"notice "+notice.type}><span>{notice.type==="success"?<CheckCircle2 size={19}/>:<AlertCircle size={19}/>}</span><p>{notice.text}</p><button onClick={()=>setNotice(null)}><X size={16}/></button></div>}
  {isDesktop() && (updateState?.status === "available" || updateState?.status === "downloaded") && (
    <div className="notice info" style={{background:"#1e1b4b",border:"1px solid #4338ca",display:"flex",alignItems:"center",gap:10}}>
@@ -328,6 +331,8 @@ function App(){
       </div>
     </div>
   </div>
-)}</div></main></div>
+)}
+<UserGuideModal isOpen={showGuideModal} onClose={()=>setShowGuideModal(false)} initialToolId={page}/>
+</div></main></div>
 }
 createRoot(document.getElementById("root")).render(<App/>);
