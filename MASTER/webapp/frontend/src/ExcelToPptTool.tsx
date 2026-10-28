@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
+import { DEFAULT_PPT_TEMPLATE_B64 } from "./defaultPptTemplate";
 import {
   FileSpreadsheet,
   Presentation,
@@ -18,7 +20,7 @@ import {
   Sparkles,
   Info
 } from "lucide-react";
-import { storageAdapter } from "./services/platform";
+import { storageAdapter, isDesktop } from "./services/platform";
 import "./excel-ppt.css";
 
 type Slot = { img: number[]; text: number[] };
@@ -123,6 +125,414 @@ const initialMapping: Mapping = {
   image: ""
 };
 
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function escapeXml(unsafe: any): string {
+  if (!unsafe) return "";
+  return String(unsafe).replace(/[<>&'"]/g, c => {
+    switch (c) {
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case "&": return "&amp;";
+      case "'": return "&apos;";
+      case '"': return "&quot;";
+      default: return c;
+    }
+  });
+}
+
+// 100% Client-Side PPTX Template Inspector (No Server Needed)
+async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<TemplateInspection> {
+  const buf = fileOrBuf instanceof ArrayBuffer ? fileOrBuf : await fileOrBuf.arrayBuffer();
+  const zip = await JSZip.loadAsync(buf);
+  const presXmlText = await zip.file("ppt/presentation.xml")?.async("text");
+  if (!presXmlText) throw new Error("Invalid presentation (missing ppt/presentation.xml)");
+
+  const sldSzMatch = presXmlText.match(/<p:sldSz\s+cx="(\d+)"\s+cy="(\d+)"/i);
+  const cx = sldSzMatch ? parseInt(sldSzMatch[1]) : 12192000;
+  const cy = sldSzMatch ? parseInt(sldSzMatch[2]) : 6858000;
+  const wIn = +(cx / 914400).toFixed(2);
+  const hIn = +(cy / 914400).toFixed(2);
+  const ratioVal = wIn / Math.max(0.1, hIn);
+  const aspectRatio = Math.abs(ratioVal - 16 / 9) < 0.1 ? "16:9" : (Math.abs(ratioVal - 4 / 3) < 0.1 ? "4:3" : `${wIn}:${hIn}`);
+
+  const slideFiles = Object.keys(zip.files).filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k));
+  slideFiles.sort((a, b) => {
+    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0");
+    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0");
+    return na - nb;
+  });
+
+  const slides: TemplateSlideInfo[] = [];
+  for (let sIdx = 0; sIdx < slideFiles.length; sIdx++) {
+    const slideXml = await zip.file(slideFiles[sIdx])?.async("text") || "";
+    const spRegex = /<p:sp>([\s\S]*?)<\/p:sp>/g;
+    const elements: TemplateSlideInfo["elements"] = [];
+    let m: RegExpExecArray | null;
+    let shIdx = 0;
+
+    while ((m = spRegex.exec(slideXml)) !== null) {
+      shIdx++;
+      const spContent = m[1];
+      const nameM = spContent.match(/name="([^"]+)"/);
+      const offM = spContent.match(/<a:off\s+x="(\d+)"\s+y="(\d+)"/);
+      const extM = spContent.match(/<a:ext\s+cx="(\d+)"\s+cy="(\d+)"/);
+      const texts = [...spContent.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map(t => t[1]);
+      const textContent = texts.join(" ");
+
+      const offX = offM ? parseInt(offM[1]) : 0;
+      const offY = offM ? parseInt(offY[2]) : 0;
+      const extCx = extM ? parseInt(extM[1]) : 1000000;
+      const extCy = extM ? parseInt(extM[2]) : 1000000;
+
+      const leftNorm = (offX / cx) * 800;
+      const topNorm = (offY / cy) * 450;
+      const widthNorm = (extCx / cx) * 800;
+      const heightNorm = (extCy / cy) * 450;
+
+      const isProdText = Boolean(/(?:SKU|Item\s*Name|Price|CM|IN|Dimensions?)/i.test(textContent));
+      elements.push({
+        id: `elem_${sIdx}_${shIdx}`,
+        name: nameM ? nameM[1] : `Shape ${shIdx}`,
+        type: "textbox",
+        text: textContent,
+        left: Math.round(leftNorm),
+        top: Math.round(topNorm),
+        width: Math.round(widthNorm),
+        height: Math.round(heightNorm),
+        font_name: "Calibri",
+        font_size: 14,
+        font_bold: true,
+        font_color: "000000",
+        is_product_candidate: isProdText
+      });
+    }
+
+    const prodCandidates = elements.filter(e => e.is_product_candidate);
+    prodCandidates.sort((a, b) => a.left - b.left);
+
+    const detectedSlots: TemplateSlot[] = prodCandidates.map((te, idx) => ({
+      slot_index: idx,
+      text_elem_id: te.id,
+      text_elem_name: te.name,
+      text_rect: [te.left, te.top, te.left + te.width, te.top + te.height],
+      img_rect: [te.left, Math.max(35, te.top - 250), te.left + te.width, Math.max(55, te.top - 12)],
+      template_text: te.text
+    }));
+
+    slides.push({
+      slide_index: sIdx,
+      layout_name: `Slide ${sIdx + 1}`,
+      elements,
+      slots_count: detectedSlots.length,
+      slots: detectedSlots,
+      is_product_slide: detectedSlots.length > 0
+    });
+  }
+
+  const recommended = slides.findIndex(s => s.is_product_slide);
+  return {
+    slide_width_in: wIn,
+    slide_height_in: hIn,
+    aspect_ratio: aspectRatio,
+    total_slides: slides.length,
+    slides,
+    recommended_product_slide: recommended >= 0 ? recommended : 0
+  };
+}
+
+// 100% Client-Side PPTX Generator (No Server / Network Needed)
+async function generateCustomPptClient(
+  excelFile: File,
+  templateBuf: ArrayBuffer,
+  mapping: Mapping,
+  imageFit: "contain" | "cover",
+  headerText?: string,
+  showHeader: boolean = true,
+  showRule: boolean = true,
+  selectedSlideIndex: number = 0
+): Promise<Blob> {
+  const excelBuf = await excelFile.arrayBuffer();
+
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(excelBuf);
+  const ws = wb.worksheets[0];
+  if (!ws) throw new Error("No worksheets found in Excel workbook.");
+
+  // Extract cell-anchored images
+  const imgByRow = new Map<number, any>();
+  try {
+    const images = ws.getImages ? ws.getImages() : [];
+    for (const img of images) {
+      const rowNum = (img.range?.tl?.nativeRow ?? 0) + 1;
+      const media = (wb.model?.media || []).find(
+        (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
+      );
+      if (media && media.buffer) {
+        imgByRow.set(rowNum, media);
+      }
+    }
+  } catch (e) {
+    console.warn("Could not read embedded images:", e);
+  }
+
+  // Header detection (checks row 1 and row 2)
+  const headers: Record<string, number> = {};
+  const r1 = ws.getRow(1);
+  r1.eachCell((cell, colNumber) => {
+    if (cell.value) headers[String(cell.value).trim().toLowerCase()] = colNumber;
+  });
+  if (Object.keys(headers).length < 2 && ws.rowCount >= 2) {
+    ws.getRow(2).eachCell((cell, colNumber) => {
+      if (cell.value) headers[String(cell.value).trim().toLowerCase()] = colNumber;
+    });
+  }
+
+  const findColNumber = (name: string): number | null => {
+    if (!name) return null;
+    const target = name.trim().toLowerCase();
+    if (headers[target]) return headers[target];
+    for (const [k, v] of Object.entries(headers)) {
+      if (k === target || k.includes(target) || target.includes(k)) {
+        return v;
+      }
+    }
+    return null;
+  };
+
+  const getCol = (key: keyof Mapping, ...fallbacks: string[]): number | null => {
+    const userSelected = (mapping[key] || "").trim();
+    if (userSelected) {
+      const col = findColNumber(userSelected);
+      if (col) return col;
+    }
+    for (const fb of fallbacks) {
+      const col = findColNumber(fb);
+      if (col) return col;
+    }
+    return null;
+  };
+
+  const codeCol = getCol("code", "buyer code", "sku", "item code", "product code", "code");
+  const descCol = getCol("description", "description", "product name", "product", "item name", "desc");
+  const dimCmCol = getCol("dim_cm", "product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)");
+  const dimInCol = getCol("dim_in", "carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)");
+  const priceCol = getCol("price", "price", "mrp", "rate", "cost");
+  const lCol = getCol("length", "length", " l");
+  const wCol = getCol("width", "width", "breadth", " w");
+  const hCol = getCol("height", "height", " h");
+
+  if (!codeCol) {
+    throw new Error("Select the product code / SKU column.");
+  }
+
+  const products: Array<{
+    code: string;
+    description: string;
+    dim_cm: string;
+    dim_in: string;
+    price: string;
+    image?: any;
+  }> = [];
+
+  const startRow = ws.rowCount >= 3 && !ws.getRow(2).getCell(codeCol).value ? 3 : 2;
+
+  ws.eachRow((row, rIdx) => {
+    if (rIdx >= startRow) {
+      const codeRaw = row.getCell(codeCol).value;
+      if (codeRaw !== null && codeRaw !== undefined && String(codeRaw).trim()) {
+        const code = String(codeRaw).trim();
+        const desc = descCol ? String(row.getCell(descCol).value || "").trim() : "";
+        let d_cm = dimCmCol ? String(row.getCell(dimCmCol).value || "").trim() : "";
+        let d_in = dimInCol ? String(row.getCell(dimInCol).value || "").trim() : "";
+        const lVal = lCol ? String(row.getCell(lCol).value || "").trim() : "";
+        const wVal = wCol ? String(row.getCell(wCol).value || "").trim() : "";
+        const hVal = hCol ? String(row.getCell(hCol).value || "").trim() : "";
+
+        if (!d_cm && (lVal || wVal || hVal)) {
+          d_cm = [lVal, wVal, hVal].filter(Boolean).join(" x ") + " CM";
+        } else if (d_cm && !d_cm.toUpperCase().endsWith("CM")) {
+          d_cm = `${d_cm} CM`;
+        }
+
+        if (!d_in && (lVal || wVal || hVal)) {
+          try {
+            const parts = [lVal, wVal, hVal].filter(Boolean).map(v => {
+              const n = parseFloat(v);
+              return isNaN(n) ? v : (n / 2.54).toFixed(1);
+            });
+            d_in = parts.join(" x ") + " IN";
+          } catch {}
+        } else if (d_in && !d_in.toUpperCase().endsWith("IN")) {
+          d_in = `${d_in} IN`;
+        }
+
+        const priceVal = priceCol ? String(row.getCell(priceCol).value || "").trim() : "";
+
+        products.push({
+          code,
+          description: desc,
+          dim_cm: d_cm,
+          dim_in: d_in,
+          price: priceVal,
+          image: imgByRow.get(rIdx)
+        });
+      }
+    }
+  });
+
+  if (products.length === 0) {
+    throw new Error("No product records found in Excel sheet. Check column mapping.");
+  }
+
+  // Load PPTX template
+  const zip = await JSZip.loadAsync(templateBuf);
+  const slideFiles = Object.keys(zip.files).filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k));
+  slideFiles.sort((a, b) => {
+    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0");
+    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0");
+    return na - nb;
+  });
+
+  const targetIdx = selectedSlideIndex >= 0 && selectedSlideIndex < slideFiles.length ? selectedSlideIndex : 0;
+  const baseSlideFile = slideFiles[targetIdx] || "ppt/slides/slide1.xml";
+  const baseRelsFile = baseSlideFile.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
+
+  const slide1XmlBase = await zip.file(baseSlideFile)?.async("text");
+  const slide1RelsBase = (await zip.file(baseRelsFile)?.async("text")) ||
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+  let presXmlStr = await zip.file("ppt/presentation.xml")?.async("text");
+  let presRelsStr = await zip.file("ppt/_rels/presentation.xml.rels")?.async("text");
+  let contentTypesStr = await zip.file("[Content_Types].xml")?.async("text");
+
+  if (!slide1XmlBase || !presXmlStr || !presRelsStr || !contentTypesStr) {
+    throw new Error("PowerPoint template is missing core presentation files.");
+  }
+
+  // Detect product slots in base slide
+  const spRegex = /<p:sp>([\s\S]*?)<\/p:sp>/g;
+  const slotShapes: Array<{ rawXml: string; offX: number; offY: number; extCx: number; extCy: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = spRegex.exec(slide1XmlBase)) !== null) {
+    const spXml = m[0];
+    const texts = [...spXml.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map(t => t[1]).join(" ");
+    const isCandidate = /(?:SKU|Item\s*Name|Price|CM|IN|Dimensions?|00\.00)/i.test(texts) || spXml.includes("Text Placeholder");
+    if (isCandidate) {
+      const offXMatch = spXml.match(/<a:off\s+x="(\d+)"/);
+      const offX = offXMatch ? parseInt(offXMatch[1]) : 0;
+      const offYMatch = spXml.match(/<a:off\s+x="\d+"\s+y="(\d+)"/);
+      const offY = offYMatch ? parseInt(offYMatch[1]) : 0;
+      const extCxMatch = spXml.match(/<a:ext\s+cx="(\d+)"/);
+      const extCx = extCxMatch ? parseInt(extCxMatch[1]) : 3400000;
+      const extCyMatch = spXml.match(/<a:ext\s+cx="\d+"\s+cy="(\d+)"/);
+      const extCy = extCyMatch ? parseInt(extCyMatch[1]) : 600000;
+      slotShapes.push({ rawXml: spXml, offX, offY, extCx, extCy });
+    }
+  }
+  slotShapes.sort((a, b) => a.offX - b.offX);
+  const slotsCount = slotShapes.length || 3;
+  const totalSlides = Math.ceil(products.length / slotsCount);
+
+  // Counters
+  const sldIdMatches = [...presXmlStr.matchAll(/id="(\d+)"/g)].map(item => parseInt(item[1]));
+  let nextSldId = sldIdMatches.length > 0 ? Math.max(...sldIdMatches) + 1 : 256;
+  const presRIdMatches = [...presRelsStr.matchAll(/Id="rId(\d+)"/g)].map(item => parseInt(item[1]));
+  let nextPresRId = Math.max(...presRIdMatches, 0) + 1;
+
+  for (let sIdx = 1; sIdx <= totalSlides; sIdx++) {
+    const slideName = `slide${sIdx}.xml`;
+    const relsName = `slide${sIdx}.xml.rels`;
+    let slideXml = slide1XmlBase;
+    let slideRels = slide1RelsBase;
+
+    // Header customization
+    if (headerText) {
+      slideXml = slideXml.replace(/<a:t>\s*NOBLE SELECTIONS\s*<\/a:t>/g, `<a:t>${escapeXml(headerText)}</a:t>`);
+    }
+    if (!showHeader) {
+      slideXml = slideXml.replace(/<p:sp>[\s\S]*?NOBLE SELECTIONS[\s\S]*?<\/p:sp>/g, "");
+    }
+    if (!showRule) {
+      slideXml = slideXml.replace(/<p:cxnSp[\s\S]*?Straight Connector 17[\s\S]*?<\/p:cxnSp>/g, "");
+    }
+
+    let nextSlideRId = Math.max(...[...slideRels.matchAll(/Id="rId(\d+)"/g)].map(item => parseInt(item[1])), 0) + 1;
+    let picsXml = "";
+
+    for (let slotIdx = 0; slotIdx < slotsCount; slotIdx++) {
+      const prodIdx = (sIdx - 1) * slotsCount + slotIdx;
+      const prod = products[prodIdx];
+      const slot = slotShapes[slotIdx];
+
+      if (prod && slot) {
+        const dimStr = [prod.dim_cm, prod.dim_in].filter(Boolean).join(" | ");
+        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" b="1" sz="1100"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="1100"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="1000"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="1000"><a:latin typeface="Calibri"/></a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
+        
+        const updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);
+        slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
+
+        if (prod.image && prod.image.buffer) {
+          const imgExt = prod.image.extension || "png";
+          const imgFilename = `prod_img_${sIdx}_${slotIdx}.${imgExt}`;
+          zip.file(`ppt/media/${imgFilename}`, prod.image.buffer);
+
+          const imgRelId = `rId${nextSlideRId++}`;
+          const relEntry = `<Relationship Id="${imgRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imgFilename}"/>`;
+          slideRels = slideRels.replace("</Relationships>", `${relEntry}</Relationships>`);
+
+          const picX = slot.offX;
+          const picY = Math.max(700000, slot.offY - 4400000);
+          const picW = slot.extCx;
+          const picH = Math.max(1000000, slot.offY - picY - 100000);
+          const picId = 2000 + prodIdx;
+
+          picsXml += `<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvPicPr><p:cNvPr id="${picId}" name="Picture ${picId}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${imgRelId}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${picX}" y="${picY}"/><a:ext cx="${picW}" cy="${picH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+        }
+      } else if (slot) {
+        const emptyTxBody = `<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>`;
+        const updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => emptyTxBody);
+        slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
+      }
+    }
+
+    if (picsXml) {
+      slideXml = slideXml.replace("</p:spTree>", `${picsXml}</p:spTree>`);
+    }
+
+    zip.file(`ppt/slides/${slideName}`, slideXml);
+    zip.file(`ppt/slides/_rels/${relsName}`, slideRels);
+
+    if (sIdx > 1) {
+      const ctEntry = `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`;
+      contentTypesStr = contentTypesStr.replace("</Types>", `${ctEntry}</Types>`);
+
+      const presRelId = `rId${nextPresRId++}`;
+      const presRelEntry = `<Relationship Id="${presRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/${slideName}"/>`;
+      presRelsStr = presRelsStr.replace("</Relationships>", `${presRelEntry}</Relationships>`);
+
+      const sldIdVal = nextSldId++;
+      const sldEntry = `<p:sldId id="${sldIdVal}" r:id="${presRelId}"/>`;
+      presXmlStr = presXmlStr.replace("</p:sldIdLst>", `${sldEntry}</p:sldIdLst>`);
+    }
+  }
+
+  zip.file("[Content_Types].xml", contentTypesStr);
+  zip.file("ppt/_rels/presentation.xml.rels", presRelsStr);
+  zip.file("ppt/presentation.xml", presXmlStr);
+
+  return await zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  });
+}
+
 export default function ExcelToPptTool() {
   // File states
   const [file, setFile] = useState<File | null>(null);
@@ -164,7 +574,7 @@ export default function ExcelToPptTool() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
 
-  // Load saved profiles from storageAdapter on mount
+  // Load saved profiles and inspect default template on mount
   useEffect(() => {
     (async () => {
       try {
@@ -174,6 +584,15 @@ export default function ExcelToPptTool() {
         }
       } catch (err) {
         console.warn("Could not load mapping profiles:", err);
+      }
+
+      try {
+        const defaultBuf = base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
+        const data = await inspectTemplateClient(defaultBuf);
+        setTemplateInfo(data);
+        setSelectedSlideIndex(data.recommended_product_slide || 0);
+      } catch (err) {
+        console.warn("Could not inspect default template:", err);
       }
     })();
   }, []);
@@ -243,7 +662,6 @@ export default function ExcelToPptTool() {
         if (rowNumber >= startRow && dataRows.length < 30) {
           const rowObj: Record<string, any> = {};
           colNames.forEach((hdr) => {
-            // Find column index matching header in row 1 or 2
             let cIndex = -1;
             const r1Vals = sheet.getRow(1).values as Array<unknown>;
             const r2Vals = sheet.getRow(2).values as Array<unknown>;
@@ -289,36 +707,35 @@ export default function ExcelToPptTool() {
     }
   };
 
-  // Handle PPT Template Upload & Inspection
+  // Handle PPT Template Upload & Inspection (100% Offline Client-Side)
   const chooseTemplate = async (next: File | null) => {
     setTemplateFile(next);
-    setTemplateInfo(null);
-    if (!next) return;
+    if (!next) {
+      try {
+        const defaultBuf = base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
+        const data = await inspectTemplateClient(defaultBuf);
+        setTemplateInfo(data);
+        setSelectedSlideIndex(data.recommended_product_slide || 0);
+        setStatus("Restored default PowerPoint template (3 products per slide, 16:9 widescreen).");
+      } catch {}
+      return;
+    }
     setInspectingTemplate(true);
     setStatus("Inspecting PowerPoint template structure & branding…");
     try {
-      const formData = new FormData();
-      formData.append("file", next);
-      const res = await fetch("/api/ppt-template/inspect", {
-        method: "POST",
-        body: formData
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-      const data: TemplateInspection = await res.json();
-      setTemplateInfo(data);
-      setSelectedSlideIndex(data.recommended_product_slide || 0);
+      const clientData = await inspectTemplateClient(next);
+      setTemplateInfo(clientData);
+      setSelectedSlideIndex(clientData.recommended_product_slide || 0);
 
-      const activeSlide = data.slides[data.recommended_product_slide || 0];
+      const activeSlide = clientData.slides[clientData.recommended_product_slide || 0];
       const slotsDetected = activeSlide ? activeSlide.slots_count : 3;
       if (slotsDetected === 2 || slotsDetected === 3) {
         setCount(slotsDetected as 2 | 3);
       }
-      setStatus(`Template inspected successfully: ${data.total_slides} slide(s), ${slotsDetected} product slots per slide.`);
-    } catch (e: any) {
-      setStatus(`Could not inspect PowerPoint template: ${e.message}`);
+      setStatus(`Template inspected successfully: ${clientData.total_slides} slide(s), ${slotsDetected} product slots per slide.`);
+    } catch (clientErr: any) {
+      console.warn("Client inspect error:", clientErr);
+      setStatus(`Could not inspect PowerPoint template: ${clientErr.message || "Invalid presentation"}`);
     } finally {
       setInspectingTemplate(false);
     }
@@ -358,7 +775,7 @@ export default function ExcelToPptTool() {
   };
   const ratioValue = ratio === "4:3" ? 4 / 3 : ratio === "A4 Landscape" ? 297 / 210 : ratio === "A4 Portrait" ? 210 / 297 : 16 / 9;
 
-  // Generate Presentation
+  // Generate Presentation (100% Offline Client-Side Engine)
   const generate = async () => {
     if (!file) {
       setStatus("Choose an Excel workbook first.");
@@ -369,54 +786,35 @@ export default function ExcelToPptTool() {
       return;
     }
     setBusy(true);
-    setStatus("Generating high-fidelity PowerPoint presentation…");
-    try {
-      const body = new FormData();
-      body.append("excel", file);
-      body.append("mapping", JSON.stringify(mapping));
-      body.append("layout", JSON.stringify(layout));
-      body.append(
-        "style",
-        JSON.stringify({
-          font_size: fontSize,
-          font_name: fontName,
-          font_color: fontColor.replace("#", ""),
-          background_color: background.replace("#", ""),
-          aspect_ratio: ratio,
-          auto_center_image: autoCenter,
-          image_fit: imageFit,
-          header_text: headerText,
-          show_header: showHeader,
-          show_rule: showRule,
-          selected_slide_index: selectedSlideIndex
-        })
-      );
-      if (useCustomTemplate && templateFile) {
-        body.append("template_pptx", templateFile);
-      }
-      if (logoFile) {
-        body.append("logo", logoFile);
-      }
+    setStatus("Generating PowerPoint presentation offline with original design preserved…");
 
-      const response = await fetch("/api/excel-to-ppt", { method: "POST", body });
-      if (!response.ok) {
-        let message = `Generation failed (${response.status})`;
-        try {
-          message = (await response.json()).detail || message;
-        } catch {}
-        throw new Error(message);
-      }
-      const blob = await response.blob();
+    try {
+      const templateBuf = templateFile
+        ? await templateFile.arrayBuffer()
+        : base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
+
+      const blob = await generateCustomPptClient(
+        file,
+        templateBuf,
+        mapping,
+        imageFit,
+        headerText,
+        showHeader,
+        showRule,
+        selectedSlideIndex
+      );
+
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = file.name.replace(/\.xlsx?$/i, "") + (useCustomTemplate && templateFile ? "_catalogue_custom.pptx" : "_catalogue.pptx");
+      a.download = file.name.replace(/\.xlsx?$/i, "") + (templateFile ? "_catalogue_custom.pptx" : "_catalogue.pptx");
       document.body.appendChild(a);
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 2000);
-      setStatus("PowerPoint generated and downloaded successfully with original design preserved.");
-    } catch (error) {
+      setStatus("PowerPoint presentation generated and downloaded successfully with original design preserved.");
+    } catch (error: any) {
+      console.error("PPT Generation error:", error);
       setStatus(error instanceof Error ? error.message : "Unexpected error while generating PowerPoint.");
     } finally {
       setBusy(false);
@@ -1060,7 +1458,7 @@ export default function ExcelToPptTool() {
       )}
 
       <p className="ep-foot">
-        All templates and spreadsheets are processed locally by the Suite API. Vector graphics, text fonts,
+        All templates and spreadsheets are processed locally by the Suite. Vector graphics, text fonts,
         cell images, and custom branding rules are preserved.
       </p>
     </main>
