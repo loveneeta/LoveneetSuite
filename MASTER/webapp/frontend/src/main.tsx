@@ -22,80 +22,580 @@ import { isDesktop, storageAdapter, syncService, updateService, UpdateStatus } f
 const CUSTOMER_NAME = "Noble Art And Craft House";
 const IMPORT_HEADERS = ["Customer Name","SO/NO (Sales Orders)","SO Quantities (Multi Qty e.g. 600, 400)","Item Code","Dimension Unit","Length","Width","Height","Ply / Board","Flute Type","Joint (inch)","Deckle Margin (inch)","Flap Type","Overlap Length (inch)","Total Quantity","Wastage %","Setup Cost","Tooling Cost","Printing Required (Yes/No)","Printing / Box","Punching / Box","Lamination / Box","Pasting / Box","Transport / Box","Other / Box","Factory Overhead %","Paper Combo Name"];
 const DEFAULTS: Record<string,string|number> = {"Dimension Unit":"inch","Flute Type":"B/C","Joint (inch)":2,"Deckle Margin (inch)":2,"Overlap Length (inch)":1,"Wastage %":6,"Setup Cost":0,"Tooling Cost":0,"Printing Required (Yes/No)":"yes","Printing / Box":0,"Punching / Box":0,"Lamination / Box":0,"Pasting / Box":0,"Transport / Box":0,"Other / Box":0,"Factory Overhead %":5,"Paper Combo Name":"18/140+18/100+18/140+18/100+18/140+18/100+18/140"};
-type RowData = {SO:string;QTY:string;ITEM:string;L:string;W:string;H:string;INCH:string;PLY:string;TYPE:string;source:string;confidence:"high"|"review";[key:string]:any};
-const blank = (source:string):RowData => ({SO:"",QTY:"",ITEM:"",L:"",W:"",H:"",INCH:"INCH",PLY:"",TYPE:"",source,confidence:"review"});
-const getTemplateValues = (r:RowData):Record<string,string|number> => {
- const values:Record<string,string|number> = {"Customer Name":CUSTOMER_NAME,"SO/NO (Sales Orders)":r["SO/NO (Sales Orders)"] ?? r.SO.replace(/^SO\//i,""),"SO Quantities (Multi Qty e.g. 600, 400)":r["SO Quantities (Multi Qty e.g. 600, 400)"] ?? r.QTY,"Item Code":r["Item Code"] ?? r.ITEM,"Dimension Unit":r["Dimension Unit"] ?? r.INCH ?? "inch","Length":r.Length ?? r.L,"Width":r.Width ?? r.W,"Height":r.Height ?? r.H,"Ply / Board":r["Ply / Board"] ?? r.PLY,"Flap Type":r["Flap Type"] ?? (/^(DF|SF)$/i.test(r.TYPE) ? r.TYPE.toUpperCase() : ""),"Total Quantity":r["Total Quantity"] ?? r.QTY};
- for(const [key,value] of Object.entries(DEFAULTS)) if(values[key]===undefined||values[key]===null||values[key]==="") values[key]=value;
- for(const h of IMPORT_HEADERS) if(r[h]!==undefined) values[h]=r[h];
- return values;
+type RowData = {
+  SO: string;
+  QTY: string;
+  ITEM: string;
+  L: string;
+  W: string;
+  H: string;
+  INCH: string;
+  PLY: string;
+  TYPE: string;
+  source: string;
+  page?: number;
+  description?: string;
+  cbm?: string;
+  price?: string;
+  amount?: string;
+  leadingRef?: string;
+  format?: string;
+  confidence: "high" | "review";
+  reviewReasons?: string[];
+  [key: string]: any;
 };
-function parseText(text:string,fileName:string):RowData[] {
- const normalized=text.replace(/\u00a0/g," ").replace(/[“”]/g,'"').replace(/[×✕]/g,"x").replace(/\s+/g," ").trim();
- const so=(normalized.match(/\bSO\s*\/\s*\d{6,}\b/i)?.[0]||normalized.match(/\bSO\s*\/\s*[A-Z0-9-]+\b/i)?.[0]||"").replace(/\s+/g,"");
- const matches=[...normalized.matchAll(/\[?\s*Box\s*-\s*\d+\s*\]?/ig)];
- const chunks:string[]=[];
- if(matches.length){for(let i=0;i<matches.length;i++){const from=matches[i].index??0,to=i+1<matches.length?(matches[i+1].index??normalized.length):normalized.length;chunks.push(normalized.slice(from,to));}}
- else chunks.push(...text.split(/(?=\b\d+(?:,\d{3})*(?:\.\d+)?\s*PCS\b)/i).filter(Boolean));
- const rows:RowData[]=[];
- for(const chunk of chunks){
-  const qtyMatch=chunk.match(/\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:PCS|PC|PIECES)\b/i);
-  const itemMatch=chunk.match(/\bITEM\s*:\s*([A-Z0-9-]+)/i);
-  const plyMatch=chunk.match(/\b([357])\s*[- ]?\s*PLY\b/i);
-  const sizeMatch=chunk.match(/\bSize\s*:\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
-  const allDims=[...chunk.matchAll(/(\d+(?:\.\d+)?)\s*(?:x|\*)\s*(\d+(?:\.\d+)?)\s*(?:x|\*)\s*(\d+(?:\.\d+)?)/ig)];
-  let type="";
-  const suffixType=chunk.match(/\[\s*\d+(?:\.\d+)?\s*\]\s*["']?\s*(DF|SF)\b/i)||chunk.match(/["']\s*(DF|SF)\s*["']/i);
-  if(suffixType) type=suffixType[1].toUpperCase(); else if(/Triangle\s*Box\s*\(\s*B\s*\)/i.test(chunk)) type="Triangle Box (B)"; else if(/Triangle\s*Box\s*\(\s*C\s*\)/i.test(chunk)) type="Triangle Box (C)"; else if(/Triangle\s*Box/i.test(chunk)) type=(chunk.match(/Triangle\s*Box\s*\([^)]*\)/i)?.[0]||"Triangle Box"); else if(/\bSF\b/i.test(chunk)) type="SF";
-  const dims=sizeMatch||allDims[0],row=blank(fileName);
-  row.SO=so;row.QTY=qtyMatch?qtyMatch[1].replace(/,/g,"").replace(/\.000$/,""):"";row.ITEM=itemMatch?itemMatch[1].toUpperCase():"";row.L=dims?.[1]||"";row.W=dims?.[2]||"";row.H=dims?.[3]||"";row.INCH="INCH";row.PLY=plyMatch?plyMatch[1]:"";row.TYPE=type;
-  row.confidence=(row.SO&&row.QTY&&row.ITEM&&row.L&&row.W&&row.H&&row.PLY&&row.TYPE)?"high":"review";
-  if(row.QTY||row.ITEM||row.PLY||row.L) rows.push(row);
- }
- const unique=new Map<string,RowData>();rows.forEach(r=>unique.set([r.source,r.SO,r.ITEM,r.QTY,r.L,r.W,r.H,r.PLY,r.TYPE].join("|"),r));return [...unique.values()];
+const blank = (source: string, page = 1): RowData => ({
+  SO: "", QTY: "", ITEM: "", L: "", W: "", H: "", INCH: "inch", PLY: "", TYPE: "",
+  source, page, description: "", cbm: "", price: "", amount: "", leadingRef: "",
+  format: "Format A (Classic RFQ)", confidence: "review", reviewReasons: ["Empty row"]
+});
+const getTemplateValues = (r: RowData): Record<string, string | number> => {
+  const values: Record<string, string | number> = {
+    "Customer Name": CUSTOMER_NAME,
+    "SO/NO (Sales Orders)": r["SO/NO (Sales Orders)"] ?? (r.SO ? r.SO.replace(/^SO\//i, "") : ""),
+    "SO Quantities (Multi Qty e.g. 600, 400)": r["SO Quantities (Multi Qty e.g. 600, 400)"] ?? r.QTY,
+    "Item Code": r["Item Code"] ?? r.ITEM,
+    "Dimension Unit": r["Dimension Unit"] ?? r.INCH ?? "inch",
+    "Length": r.Length ?? r.L,
+    "Width": r.Width ?? r.W,
+    "Height": r.Height ?? r.H,
+    "Ply / Board": r["Ply / Board"] ?? r.PLY,
+    "Flap Type": r["Flap Type"] ?? (/^(DF|SF)$/i.test(r.TYPE) ? r.TYPE.toUpperCase() : ""),
+    "Total Quantity": r["Total Quantity"] ?? r.QTY
+  };
+  for (const [key, value] of Object.entries(DEFAULTS)) {
+    if (values[key] === undefined || values[key] === null || values[key] === "") values[key] = value;
+  }
+  for (const h of IMPORT_HEADERS) {
+    if (r[h] !== undefined) values[h] = r[h];
+  }
+  return values;
+};
+function cleanDesc(raw: string): string {
+  const s = raw.trim();
+  const words = s.split(/\s+/);
+  if (words.length >= 2 && words.length % 2 === 0) {
+    const half = words.length / 2;
+    if (words.slice(0, half).join(" ") === words.slice(half).join(" ")) {
+      return words.slice(0, half).join(" ");
+    }
+  }
+  const mid = Math.floor(s.length / 2);
+  if (s.slice(0, mid).trim() === s.slice(mid).trim()) {
+    return s.slice(0, mid).trim();
+  }
+  return s;
 }
-async function pdfText(file:File,setStatus:(s:string)=>void):Promise<string>{
- const doc=await (pdfjsLib as any).getDocument({data:await file.arrayBuffer()}).promise;let all="";
- for(let p=1;p<=doc.numPages;p++){setStatus(file.name+": reading page "+p+" of "+doc.numPages);const page=await doc.getPage(p),content=await page.getTextContent(),pageText=content.items.map((x:any)=>x.str||"").join("\n");if(pageText.replace(/\s/g,"").length>30)all+="\n"+pageText;else{setStatus(file.name+": OCR page "+p+" of "+doc.numPages);const viewport=page.getViewport({scale:1.8}),canvas=document.createElement("canvas");canvas.width=viewport.width;canvas.height=viewport.height;const ctx=canvas.getContext("2d");if(!ctx)throw Error("Could not create PDF page canvas.");await page.render({canvasContext:ctx,viewport}).promise;const result=await Tesseract.recognize(canvas,"eng");all+="\n"+result.data.text;}}
- return all;
+type PdfPageData = { pageNo: number; text: string };
+function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowData[]; format: string } {
+  const fullText = pagesData.map(p => p.text).join(" ");
+  const normalizedFull = fullText.replace(/\u00a0/g, " ").replace(/[“”]/g, '"').replace(/[×✕]/g, "x").replace(/\s+/g, " ").trim();
+
+  const isFormatB = Boolean(
+    normalizedFull.match(/\bProposed\s*Vendor\b/i) ||
+    normalizedFull.match(/\bPurchase\s*Type\b/i) ||
+    normalizedFull.match(/\bStock\s*Avl\b/i)
+  );
+
+  let mSo = normalizedFull.match(/\bSale\s*Order\s*(?:[:=-]\s*)?(SO\s*\/\s*[A-Z0-9-]+)\b/i);
+  if (!mSo) mSo = normalizedFull.match(/\b(SO\s*\/\s*\d{6,})\b/i);
+  if (!mSo) mSo = normalizedFull.match(/\b(PO\s*\/\s*\d{6,})\b/i);
+  if (!mSo) mSo = normalizedFull.match(/\bRequest\s*For\s*Qua?tation\s*#\s*([A-Z0-9\/-]+)\b/i);
+
+  const docSo = mSo ? mSo[1].replace(/\s+/g, "") : "";
+  const formatLabel = isFormatB ? "Format B (Alternate RFQ)" : "Format A (Classic RFQ)";
+
+  const rows: RowData[] = [];
+
+  for (const pInfo of pagesData) {
+    const pNo = pInfo.pageNo;
+    const pText = pInfo.text;
+    const normP = pText.replace(/\u00a0/g, " ").replace(/[“”]/g, '"').replace(/[×✕]/g, "x").replace(/\s+/g, " ").trim();
+
+    const matches = [...normP.matchAll(/\[?\s*(Box\s*-\s*\d+[A-Z]?)\s*\]?/gi)];
+    if (!matches.length) continue;
+
+    for (let i = 0; i < matches.length; i++) {
+      const boxCode = matches[i][1].replace(/\s+/g, "");
+      const frm = matches[i].index ?? 0;
+      const to = (i + 1 < matches.length) ? (matches[i + 1].index ?? normP.length) : normP.length;
+      const chunk = normP.slice(frm, to);
+
+      const preceding = normP.slice(Math.max(0, frm - 40), frm).trim();
+      const leadRefM = preceding.match(/([A-Z0-9]+)\s*$/i);
+      const leadingRef = (leadRefM && !/(?:Description|Remarks|Amount|Price|Date|Qty)$/i.test(leadRefM[1])) ? leadRefM[1] : "";
+
+      if (/^(?:Terms\s*&|Special\s*Comment|NOT\s*FOR\s*VENDOR|Noble\s*Art)/i.test(chunk)) {
+        continue;
+      }
+
+      // 1. Qty
+      const qtyM = chunk.match(/\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:PCS|PC|PIECES)\b/i);
+      const qty = qtyM ? qtyM[1].replace(/,/g, "").replace(/\.000$/, "") : "";
+
+      // 2. Item Code
+      const itemCode = boxCode;
+
+      // 3. Ply
+      const plyM = chunk.match(/\b([357])\s*[- ]?\s*PLY\b/i);
+      const ply = plyM ? plyM[1] : "";
+
+      // 4. Box Type (SF / DF)
+      let typeStr = "";
+      const suffixType = chunk.match(/\[\s*\d+(?:\.\d+)?\s*\]\s*["']?\s*(DF|SF)\b/i) || chunk.match(/["']\s*(DF|SF)\s*["']/i);
+      if (suffixType) {
+        typeStr = suffixType[1].toUpperCase();
+      } else if (/Triangle\s*Box\s*\(\s*B\s*\)/i.test(chunk)) {
+        typeStr = "Triangle Box (B)";
+      } else if (/Triangle\s*Box\s*\(\s*C\s*\)/i.test(chunk)) {
+        typeStr = "Triangle Box (C)";
+      } else if (/Triangle\s*Box/i.test(chunk)) {
+        typeStr = "Triangle Box";
+      } else if (/\bSF\b/i.test(chunk)) {
+        typeStr = "SF";
+      } else if (/\bDF\b/i.test(chunk)) {
+        typeStr = "DF";
+      }
+
+      // 5. Dimensions L, W, H
+      let l = "", w = "", h = "";
+      const sizeM = chunk.match(/\bSize\s*:\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)(?:\s*["']|\b)/i);
+      if (sizeM) {
+        l = sizeM[1]; w = sizeM[2]; h = sizeM[3];
+      } else {
+        const dimM = chunk.match(/\[?\s*Box\s*-\s*\d+[A-Z]?\s*\]?\s*(?:M\s*-\s*)?(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)(?:\s*(?:TOP|MASTER|INNER|DF|SF|["']|\b|$))/i);
+        if (dimM) {
+          l = dimM[1]; w = dimM[2]; h = dimM[3];
+        } else {
+          const genM = chunk.match(/(?:^|[^\d.+=-])(?:M\s*-\s*)?(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)/i);
+          if (genM) {
+            l = genM[1]; w = genM[2]; h = genM[3];
+          }
+        }
+      }
+
+      // 6. Description
+      const descM = chunk.match(/\[?\s*Box\s*-\s*\d+[A-Z]?\s*\]?\s*([A-Za-z0-9.*() -]+?)(?:\s+(?:[357]-?PLY|\d+PLY|ITEM:|Size:|Ref:|Price|\d+LBS|PRINTED|V2H2))/i);
+      const desc = descM ? cleanDesc(descM[1]) : "";
+
+      // 7. CBM
+      const cbmM = chunk.match(/\bCBM\s*[:=]?\s*(\d+(?:\.\d+)?)/i);
+      const cbm = cbmM ? cbmM[1] : "";
+
+      // 8. Price & Amount
+      const priceM = chunk.match(/\b(\d+\.\d{2,3})\s+(?:\d{1,3}(?:,\d{3})*\.\d{2})\s*₹/);
+      const amtM = chunk.match(/(\d{1,3}(?:,\d{3})*\.\d{2})\s*₹/);
+      const price = priceM ? priceM[1] : "";
+      const amt = amtM ? amtM[1] : "";
+
+      // Confidence & review reasons
+      const reviewReasons: string[] = [];
+      if (!docSo) reviewReasons.push("Missing SO/PO");
+      if (!qty) reviewReasons.push("Missing Quantity");
+      if (!l || !w || !h) reviewReasons.push("Incomplete Dimensions");
+      if (!ply) reviewReasons.push("Missing Ply");
+      if (!typeStr) reviewReasons.push("Missing Box Type (SF/DF)");
+
+      const confidence = reviewReasons.length ? "review" : "high";
+
+      rows.push({
+        SO: docSo,
+        QTY: qty,
+        ITEM: itemCode,
+        L: l,
+        W: w,
+        H: h,
+        INCH: "inch",
+        PLY: ply,
+        TYPE: typeStr,
+        source: filename,
+        page: pNo,
+        description: desc,
+        cbm,
+        price,
+        amount: amt,
+        leadingRef,
+        format: formatLabel,
+        confidence,
+        reviewReasons
+      });
+    }
+  }
+
+  // Fallback if no Box codes matched
+  if (!rows.length) {
+    const fallbackChunks = fullText.split(/(?=\b\d+(?:,\d{3})*(?:\.\d+)?\s*PCS\b)/i).filter(Boolean);
+    for (const chunk of fallbackChunks) {
+      const qtyMatch = chunk.match(/\b(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:PCS|PC|PIECES)\b/i);
+      const itemMatch = chunk.match(/\bITEM\s*:\s*([A-Z0-9-]+)/i);
+      const plyMatch = chunk.match(/\b([357])\s*[- ]?\s*PLY\b/i);
+      const sizeMatch = chunk.match(/\bSize\s*:\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+      const allDims = [...chunk.matchAll(/(\d+(?:\.\d+)?)\s*(?:x|\*)\s*(\d+(?:\.\d+)?)\s*(?:x|\*)\s*(\d+(?:\.\d+)?)/ig)];
+      let type = "";
+      const suffixType = chunk.match(/\[\s*\d+(?:\.\d+)?\s*\]\s*["']?\s*(DF|SF)\b/i) || chunk.match(/["']\s*(DF|SF)\s*["']/i);
+      if (suffixType) type = suffixType[1].toUpperCase();
+      else if (/Triangle\s*Box\s*\(\s*B\s*\)/i.test(chunk)) type = "Triangle Box (B)";
+      else if (/Triangle\s*Box\s*\(\s*C\s*\)/i.test(chunk)) type = "Triangle Box (C)";
+      else if (/Triangle\s*Box/i.test(chunk)) type = "Triangle Box";
+      else if (/\bSF\b/i.test(chunk)) type = "SF";
+      else if (/\bDF\b/i.test(chunk)) type = "DF";
+
+      const dims = sizeMatch || allDims[0];
+      const r = blank(filename, 1);
+      r.SO = docSo;
+      r.QTY = qtyMatch ? qtyMatch[1].replace(/,/g, "").replace(/\.000$/, "") : "";
+      r.ITEM = itemMatch ? itemMatch[1].toUpperCase() : "";
+      r.L = dims?.[1] || "";
+      r.W = dims?.[2] || "";
+      r.H = dims?.[3] || "";
+      r.INCH = "inch";
+      r.PLY = plyMatch ? plyMatch[1] : "";
+      r.TYPE = type;
+      r.confidence = (r.SO && r.QTY && r.ITEM && r.L && r.W && r.H && r.PLY && r.TYPE) ? "high" : "review";
+      if (r.QTY || r.ITEM || r.PLY || r.L) rows.push(r);
+    }
+  }
+
+  const unique = new Map<string, RowData>();
+  rows.forEach(r => unique.set([r.source, r.SO, r.ITEM, r.QTY, r.L, r.W, r.H, r.PLY, r.TYPE].join("|"), r));
+  return { rows: [...unique.values()], format: formatLabel };
 }
-function PdfExcelTool(){
- const [files,setFiles]=useState<File[]>([]),[rows,setRows]=useState<RowData[]>([]),[status,setStatus]=useState(""),[busy,setBusy]=useState(false),[done,setDone]=useState(false);
- const reviewCount=useMemo(()=>rows.filter(r=>r.confidence==="review").length,[rows]);
- const addFiles=(list:FileList|null)=>{if(!list)return;setFiles(prev=>[...prev,...Array.from(list).filter(f=>f.type==="application/pdf"||f.name.toLowerCase().endsWith(".pdf"))]);setDone(false);};
- const convert=async()=>{if(!files.length)return;setBusy(true);setRows([]);setDone(false);try{const all:RowData[]=[];for(const file of files){const text=await pdfText(file,setStatus),parsed=parseText(text,file.name);if(!parsed.length)all.push({...blank(file.name),confidence:"review"});else all.push(...parsed);}setRows(all);setDone(true);setStatus("Finished: "+all.length+" item rows extracted.");
-for(const r of all){
-  storageAdapter.savePoRecord({
-    sourceFile: r.source,
-    soNumber: r.SO,
-    itemCode: r.ITEM,
-    qty: r.QTY,
-    length: r.L,
-    width: r.W,
-    height: r.H,
-    ply: r.PLY,
-    boxType: r.TYPE,
-    confidence: r.confidence,
-    rawPayload: r
-  });
-}}catch(e:any){setStatus("Conversion failed: "+(e?.message||"Unknown error"));}finally{setBusy(false);}};
- const updateRow=(idx:number,key:string,value:string)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[key]:value,confidence:"review"}:r));
- const makeWorkbook=async(data:RowData[],title:string)=>{const wb=new ExcelJS.Workbook();wb.creator="PDF to Excel Converter";const ws=wb.addWorksheet("Bulk Calculation Template");ws.addRow([...IMPORT_HEADERS]);data.forEach(r=>{const values=getTemplateValues(r);ws.addRow(IMPORT_HEADERS.map(h=>values[h]??""));});ws.views=[{state:"frozen",ySplit:1}];ws.autoFilter={from:"A1",to:"AA"+(data.length+1)};ws.getRow(1).font={bold:true,color:{argb:"FFFFFFFF"}};ws.getRow(1).fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF2678B8"}};ws.getRow(1).alignment={horizontal:"center",vertical:"middle",wrapText:true};ws.getRow(1).height=42;[28,22,32,16,15,12,12,12,15,14,14,20,14,20,16,12,12,12,26,16,16,18,16,18,14,20,48].forEach((w,i)=>ws.getColumn(i+1).width=w);const buf=await wb.xlsx.writeBuffer();saveAs(new Blob([buf]),title);};
- const exportSeparate=async()=>{for(let i=0;i<files.length;i++){const data=rows.filter(r=>r.source===files[i].name);if(data.length)await makeWorkbook(data,files[i].name.replace(/\.pdf$/i,"")+".xlsx");}};
- return <main className="pdf-shell">
-  <section className="pdf-hero"><div><p className="pdf-eyebrow">PURCHASE ORDER WORKFLOW</p><h2>Turn PDF purchase orders into the 27-column Excel template.</h2><p>Upload multiple quotations, extract SO numbers, quantities, item codes, dimensions, ply and DF/SF type. Review rows before exporting the Box App bulk calculation workbook.</p></div><div className="pdf-hero-icon"><FileText size={48}/><span>PDF → XLSX</span></div></section>
-  <section className="pdf-panel"><div className="pdf-section-title"><div><h3>1. Select PDF files</h3><p>Text PDFs and scanned pages (OCR) are supported.</p></div><span className="pdf-count">{files.length} selected</span></div>
-   <label className="pdf-drop" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();addFiles(e.dataTransfer.files);}}><input type="file" accept="application/pdf,.pdf" multiple onChange={e=>addFiles(e.target.files)}/><span className="pdf-upload-icon"><Upload size={25}/></span><strong>Drop PDF files here or browse</strong><small>Multiple PDFs supported · Processed inside this browser</small></label>
-   {files.length>0&&<div className="pdf-files">{files.map((f,i)=><div className="pdf-file" key={i}><FileText size={17}/><span>{f.name}</span><small>{(f.size/1024).toFixed(0)} KB</small><button type="button" className="pdf-icon-btn" onClick={()=>setFiles(prev=>prev.filter((_,j)=>j!==i))} aria-label="Remove file"><Trash2 size={15}/></button></div>)}</div>}
-   <button type="button" className="pdf-primary" disabled={!files.length||busy} onClick={convert}>{busy?<><LoaderCircle className="pdf-spin" size={17}/> Converting…</>:<><FileSpreadsheet size={17}/> Convert to Excel</>}</button>{status&&<p className="pdf-status" role="status">{status}</p>}
-  </section>
-  {rows.length>0&&<section className="pdf-panel"><div className="pdf-section-title"><div><h3>2. Review extracted items</h3><p>Edit any of the 27 template columns before exporting.</p></div><span className={"pdf-count "+(reviewCount?"review":"complete")}>{reviewCount?reviewCount+" need review":"Rows ready to export"}</span></div>
-   <div className="pdf-notice"><AlertTriangle size={17}/><span>Extraction is heuristic. Verify item codes, quantities and dimensions against each source PDF before importing the workbook.</span></div>
-   <div className="pdf-table-wrap"><table className="pdf-table"><thead><tr>{IMPORT_HEADERS.map(h=><th key={h}>{h}</th>)}<th>CHECK</th></tr></thead><tbody>{rows.map((r,i)=><tr key={i} className={r.confidence==="review"?"pdf-needs-review":""}>{IMPORT_HEADERS.map(h=>{const vals=getTemplateValues(r);return <td key={h}><input value={String(vals[h]??"")} onChange={e=>updateRow(i,h,e.target.value)} aria-label={h+" row "+(i+1)}/></td>})}<td>{r.confidence==="review"?<span className="pdf-review-tag">Review</span>:<span className="pdf-good-tag">OK</span>}</td></tr>)}</tbody></table></div>
-   <div className="pdf-export-row"><button type="button" className="pdf-secondary" onClick={()=>makeWorkbook(rows,"Combined_Quotation_Items.xlsx")}><Download size={16}/> Export combined template</button><button type="button" className="pdf-primary" onClick={exportSeparate}><Files size={16}/> Export separate Excel files</button></div>
-  </section>}
-  <footer className="pdf-footer">Exports the exact 27-column Box App Bulk Calculation Template. <span>Always verify extracted values before use.</span></footer>
- </main>;
+async function pdfText(file: File, setStatus: (s: string) => void): Promise<{ pages: PdfPageData[]; fullText: string }> {
+  const doc = await (pdfjsLib as any).getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages: PdfPageData[] = [];
+  let all = "";
+  for (let p = 1; p <= doc.numPages; p++) {
+    setStatus(`${file.name}: reading page ${p} of ${doc.numPages}`);
+    const page = await doc.getPage(p);
+    const content = await page.getTextContent();
+    const pageText = content.items.map((x: any) => x.str || "").join("\n");
+    if (pageText.replace(/\s/g, "").length > 30) {
+      pages.push({ pageNo: p, text: pageText });
+      all += "\n" + pageText;
+    } else {
+      setStatus(`${file.name}: OCR page ${p} of ${doc.numPages}`);
+      const viewport = page.getViewport({ scale: 1.8 });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw Error("Could not create PDF page canvas.");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const result = await Tesseract.recognize(canvas, "eng");
+      pages.push({ pageNo: p, text: result.data.text });
+      all += "\n" + result.data.text;
+    }
+  }
+  return { pages, fullText: all };
+}
+function PdfExcelTool() {
+  const [files, setFiles] = useState<File[]>([]);
+  const [rows, setRows] = useState<RowData[]>([]);
+  const [detectedFormats, setDetectedFormats] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const reviewCount = useMemo(() => rows.filter(r => r.confidence === "review").length, [rows]);
+  const readyCount = useMemo(() => rows.filter(r => r.confidence === "high").length, [rows]);
+
+  const addFiles = (list: FileList | null) => {
+    if (!list) return;
+    setFiles(prev => [...prev, ...Array.from(list).filter(f => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"))]);
+    setDone(false);
+  };
+
+  const convert = async () => {
+    if (!files.length) return;
+    setBusy(true);
+    setRows([]);
+    setDone(false);
+    try {
+      const all: RowData[] = [];
+      const formats: Record<string, string> = {};
+      for (const file of files) {
+        const { pages } = await pdfText(file, setStatus);
+        const { rows: parsed, format } = parseRfqPages(pages, file.name);
+        formats[file.name] = format;
+        if (!parsed.length) {
+          all.push({ ...blank(file.name, 1), confidence: "review" });
+        } else {
+          all.push(...parsed);
+        }
+      }
+      setDetectedFormats(formats);
+      setRows(all);
+      setDone(true);
+      setStatus(`Finished: ${all.length} item rows extracted across ${files.length} document(s).`);
+
+      for (const r of all) {
+        storageAdapter.savePoRecord({
+          sourceFile: r.source,
+          soNumber: r.SO,
+          itemCode: r.ITEM,
+          qty: r.QTY,
+          length: r.L,
+          width: r.W,
+          height: r.H,
+          ply: r.PLY,
+          boxType: r.TYPE,
+          confidence: r.confidence,
+          rawPayload: r
+        });
+      }
+    } catch (e: any) {
+      setStatus("Conversion failed: " + (e?.message || "Unknown error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateRow = (idx: number, key: string, value: string) => {
+    setRows(prev => prev.map((r, i) => {
+      if (i !== idx) return r;
+      const updated = { ...r, [key]: value };
+      if (key === "Length") updated.L = value;
+      if (key === "Width") updated.W = value;
+      if (key === "Height") updated.H = value;
+      if (key === "Item Code") updated.ITEM = value;
+      if (key === "Total Quantity" || key === "SO Quantities (Multi Qty e.g. 600, 400)") updated.QTY = value;
+      if (key === "Ply / Board") updated.PLY = value;
+      if (key === "Flap Type") updated.TYPE = value;
+      if (key === "SO/NO (Sales Orders)") updated.SO = value;
+
+      const reasons: string[] = [];
+      if (!updated.SO) reasons.push("Missing SO/PO");
+      if (!updated.QTY) reasons.push("Missing Quantity");
+      if (!updated.L || !updated.W || !updated.H) reasons.push("Incomplete Dimensions");
+      if (!updated.PLY) reasons.push("Missing Ply");
+      if (!updated.TYPE) reasons.push("Missing Box Type (SF/DF)");
+      updated.reviewReasons = reasons;
+      updated.confidence = reasons.length ? "review" : "high";
+      return updated;
+    }));
+  };
+
+  const makeWorkbook = async (data: RowData[], title: string) => {
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "PDF to Excel Converter";
+    const ws = wb.addWorksheet("Bulk Calculation Template");
+    ws.addRow([...IMPORT_HEADERS]);
+    data.forEach(r => {
+      const values = getTemplateValues(r);
+      ws.addRow(IMPORT_HEADERS.map(h => values[h] ?? ""));
+    });
+    ws.views = [{ state: "frozen", ySplit: 1 }];
+    ws.autoFilter = { from: "A1", to: "AA" + (data.length + 1) };
+    ws.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2678B8" } };
+    ws.getRow(1).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    ws.getRow(1).height = 42;
+    [28, 22, 32, 16, 15, 12, 12, 12, 15, 14, 14, 20, 14, 20, 16, 12, 12, 12, 26, 16, 16, 18, 16, 18, 14, 20, 48].forEach((w, i) => ws.getColumn(i + 1).width = w);
+    const buf = await wb.xlsx.writeBuffer();
+    saveAs(new Blob([buf]), title);
+  };
+
+  const exportSeparate = async () => {
+    for (let i = 0; i < files.length; i++) {
+      const data = rows.filter(r => r.source === files[i].name);
+      if (data.length) await makeWorkbook(data, files[i].name.replace(/\.pdf$/i, "") + ".xlsx");
+    }
+  };
+
+  return (
+    <main className="pdf-shell">
+      <section className="pdf-hero">
+        <div>
+          <p className="pdf-eyebrow">PURCHASE ORDER WORKFLOW</p>
+          <h2>Turn PDF purchase orders into the 27-column Excel template.</h2>
+          <p>
+            Upload multiple quotations (Classic RFQ or Alternate RFQ format), extract SO numbers, quantities, item codes, dimensions, ply and DF/SF type. Review rows before exporting the Box App bulk calculation workbook.
+          </p>
+        </div>
+        <div className="pdf-hero-icon">
+          <FileText size={48} />
+          <span>PDF → XLSX</span>
+        </div>
+      </section>
+
+      <section className="pdf-panel">
+        <div className="pdf-section-title">
+          <div>
+            <h3>1. Select PDF files</h3>
+            <p>Supports RFQ-6 (Classic) and RFQ-13 (Alternate) layouts, text PDFs and scanned pages (OCR).</p>
+          </div>
+          <span className="pdf-count">{files.length} selected</span>
+        </div>
+
+        <label
+          className="pdf-drop"
+          onDragOver={e => e.preventDefault()}
+          onDrop={e => {
+            e.preventDefault();
+            addFiles(e.dataTransfer.files);
+          }}
+        >
+          <input
+            type="file"
+            accept="application/pdf,.pdf"
+            multiple
+            onChange={e => addFiles(e.target.files)}
+          />
+          <span className="pdf-upload-icon"><Upload size={25} /></span>
+          <strong>Drop PDF files here or browse</strong>
+          <small>Multiple PDFs supported · Processed inside this browser</small>
+        </label>
+
+        {files.length > 0 && (
+          <div className="pdf-files">
+            {files.map((f, i) => (
+              <div className="pdf-file" key={i}>
+                <FileText size={17} />
+                <span>{f.name}</span>
+                <small>{(f.size / 1024).toFixed(0)} KB</small>
+                <button
+                  type="button"
+                  className="pdf-icon-btn"
+                  onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
+                  aria-label="Remove file"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button
+          type="button"
+          className="pdf-primary"
+          disabled={!files.length || busy}
+          onClick={convert}
+        >
+          {busy ? (
+            <><LoaderCircle className="pdf-spin" size={17} /> Converting…</>
+          ) : (
+            <><FileSpreadsheet size={17} /> Convert to Excel</>
+          )}
+        </button>
+        {status && <p className="pdf-status" role="status">{status}</p>}
+      </section>
+
+      {rows.length > 0 && (
+        <section className="pdf-panel">
+          <div className="pdf-section-title">
+            <div>
+              <h3>2. Review extracted items</h3>
+              <p>Verify detected fields, inspect warnings, and edit any of the 27 template columns before exporting.</p>
+            </div>
+            <span className={"pdf-count " + (reviewCount ? "review" : "complete")}>
+              {reviewCount ? `${reviewCount} need review` : "All rows ready to export"}
+            </span>
+          </div>
+
+          <div className="pdf-summary-bar">
+            <div className="pdf-summary-stat">
+              <span className="pdf-stat-label">Total Products</span>
+              <span className="pdf-stat-val">{rows.length}</span>
+            </div>
+            <div className="pdf-summary-stat">
+              <span className="pdf-stat-label">Ready to Export</span>
+              <span className="pdf-stat-val success">{readyCount}</span>
+            </div>
+            <div className="pdf-summary-stat">
+              <span className="pdf-stat-label">Needs Review</span>
+              <span className={"pdf-stat-val " + (reviewCount > 0 ? "warning" : "success")}>{reviewCount}</span>
+            </div>
+            <div className="pdf-summary-stat">
+              <span className="pdf-stat-label">Layout Detected</span>
+              <span className="pdf-stat-val format-info" title={Object.entries(detectedFormats).map(([f, fmt]) => `${f}: ${fmt}`).join("\n")}>
+                {Object.entries(detectedFormats).map(([f, fmt]) => `${f.length > 18 ? f.slice(0, 15) + '...' : f}: ${fmt.replace(/ \([^)]+\)/, '')}`).join(" | ") || "Auto-detected"}
+              </span>
+            </div>
+          </div>
+
+          <div className="pdf-notice">
+            <AlertTriangle size={17} />
+            <span>
+              Review each product row below. Source descriptions and detected page references are displayed alongside the 27 calculation template columns.
+            </span>
+          </div>
+
+          <div className="pdf-table-wrap">
+            <table className="pdf-table">
+              <thead>
+                <tr>
+                  <th style={{ minWidth: "120px" }}>Source &amp; Page</th>
+                  <th style={{ minWidth: "180px" }}>Source Description</th>
+                  {IMPORT_HEADERS.map(h => (
+                    <th key={h}>{h}</th>
+                  ))}
+                  <th>CHECK</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const vals = getTemplateValues(r);
+                  return (
+                    <tr key={i} className={r.confidence === "review" ? "pdf-needs-review" : ""}>
+                      <td className="pdf-meta-cell" title={r.source}>
+                        {r.source.length > 20 ? r.source.slice(0, 18) + "…" : r.source} (p.{r.page || 1})
+                      </td>
+                      <td className="pdf-desc-cell" title={r.description}>
+                        {r.description || "-"}
+                      </td>
+                      {IMPORT_HEADERS.map(h => (
+                        <td key={h}>
+                          <input
+                            value={String(vals[h] ?? "")}
+                            onChange={e => updateRow(i, h, e.target.value)}
+                            aria-label={`${h} row ${i + 1}`}
+                          />
+                        </td>
+                      ))}
+                      <td>
+                        {r.confidence === "review" ? (
+                          <span
+                            className="pdf-review-tag"
+                            title={r.reviewReasons?.join(", ") || "Review needed"}
+                          >
+                            Review
+                          </span>
+                        ) : (
+                          <span className="pdf-good-tag">OK</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="pdf-export-row">
+            <button
+              type="button"
+              className="pdf-secondary"
+              onClick={() => makeWorkbook(rows, "Combined_Quotation_Items.xlsx")}
+            >
+              <Download size={16} /> Export combined template
+            </button>
+            <button
+              type="button"
+              className="pdf-primary"
+              onClick={exportSeparate}
+            >
+              <Files size={16} /> Export separate Excel files
+            </button>
+          </div>
+        </section>
+      )}
+
+      <footer className="pdf-footer">
+        Exports the exact 27-column Box App Bulk Calculation Template. <span>Always verify extracted values before use.</span>
+      </footer>
+    </main>
+  );
 }
 
 const tools = [{id:"dashboard",name:"Overview",icon:LayoutDashboard},{id:"collector",name:"File Collector",icon:FolderSync},{id:"convert",name:"Image Converter",icon:Images},{id:"organize",name:"Image Organizer",icon:FolderTree},{id:"ppt",name:"PowerPoint Exporter",icon:Presentation},{id:"pdf-excel",name:"PO PDF to Excel",icon:FileSpreadsheet},{id:"excel-ppt",name:"Excel to Catalogue PPT",icon:Presentation},{id:"ppt-excel",name:"PPT to Excel with Images",icon:Presentation}];
