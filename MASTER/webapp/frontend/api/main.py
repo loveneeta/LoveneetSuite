@@ -150,12 +150,161 @@ async def ppt_export(files: Annotated[list[UploadFile], File()], export_jpg: Ann
         return zip_folder(out,"powerpoint_exports.zip")
 
 
+def duplicate_slide(prs, source_slide):
+    import copy
+    slide_layout = source_slide.slide_layout
+    dest_slide = prs.slides.add_slide(slide_layout)
+    for shape in list(dest_slide.shapes):
+        sp = shape._element
+        sp.getparent().remove(sp)
+    for shape in source_slide.shapes:
+        new_sp = copy.deepcopy(shape._element)
+        dest_slide.shapes._spTree.append(new_sp)
+    for rel in source_slide.part.rels.values():
+        if "image" in rel.reltype:
+            dest_slide.part.relate_to(rel.target_part, rel.reltype)
+    return dest_slide
+
+
+@app.post("/api/ppt-template/inspect")
+async def inspect_ppt_template(file: UploadFile = File(...)):
+    """Inspect an uploaded PPTX template, extracting slide dimensions, elements, text, and candidate product slots."""
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".pptx", ".ppt"}:
+        raise HTTPException(400, "Upload a .pptx or .ppt PowerPoint presentation.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        t_path = root / safe_name(file.filename or "template.pptx")
+        t_path.write_bytes(await file.read())
+        try:
+            prs = Presentation(t_path)
+        except Exception as e:
+            raise HTTPException(400, f"Cannot open PowerPoint template: {e}")
+
+        w_in = prs.slide_width / 914400.0
+        h_in = prs.slide_height / 914400.0
+        ratio_val = w_in / max(0.1, h_in)
+        aspect_ratio = "16:9" if abs(ratio_val - 16 / 9) < 0.1 else ("4:3" if abs(ratio_val - 4 / 3) < 0.1 else f"{w_in:.1f}:{h_in:.1f}")
+
+        slides_data = []
+        for s_idx, slide in enumerate(prs.slides):
+            elements = []
+            for sh_idx, shape in enumerate(slide.shapes):
+                sh_type = "unknown"
+                if shape.shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
+                    sh_type = "textbox"
+                elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    sh_type = "picture"
+                elif shape.shape_type == MSO_SHAPE_TYPE.PLACEHOLDER:
+                    sh_type = "placeholder"
+                elif shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                    sh_type = "group"
+                elif shape.shape_type == MSO_SHAPE_TYPE.LINE:
+                    sh_type = "line"
+                else:
+                    sh_type = "shape"
+
+                left_norm = (shape.left / prs.slide_width) * 800
+                top_norm = (shape.top / prs.slide_height) * 450
+                width_norm = (shape.width / prs.slide_width) * 800
+                height_norm = (shape.height / prs.slide_height) * 450
+
+                text_content = ""
+                font_name = "Calibri"
+                font_size = 14
+                font_bold = False
+                font_color = "000000"
+
+                if shape.has_text_frame:
+                    paragraphs = [p.text for p in shape.text_frame.paragraphs if p.text.strip()]
+                    text_content = "\n".join(paragraphs)
+                    for p in shape.text_frame.paragraphs:
+                        for r in p.runs:
+                            if r.font.name:
+                                font_name = r.font.name
+                            if r.font.size:
+                                font_size = round(r.font.size.pt)
+                            if r.font.bold is not None:
+                                font_bold = bool(r.font.bold)
+                            if r.font.color and hasattr(r.font.color, "rgb") and r.font.color.rgb:
+                                font_color = str(r.font.color.rgb)
+                            break
+                        if text_content:
+                            break
+
+                is_prod_text = bool(re.search(r"\b(SKU|Item\s*Name|Price|CM|IN|Dimensions?)\b", text_content, re.I))
+                is_prod_pic = sh_type == "picture" or "picture" in shape.name.lower() or "image" in shape.name.lower()
+
+                elements.append({
+                    "id": f"elem_{s_idx}_{sh_idx}",
+                    "name": shape.name,
+                    "type": sh_type,
+                    "text": text_content,
+                    "left": round(left_norm, 1),
+                    "top": round(top_norm, 1),
+                    "width": round(width_norm, 1),
+                    "height": round(height_norm, 1),
+                    "font_name": font_name,
+                    "font_size": font_size,
+                    "font_bold": font_bold,
+                    "font_color": font_color,
+                    "is_product_candidate": is_prod_text or is_prod_pic
+                })
+
+            prod_text_elems = [e for e in elements if e["is_product_candidate"] and e["type"] in ("textbox", "placeholder") and e["text"]]
+            prod_text_elems.sort(key=lambda e: e["left"])
+
+            prod_pic_elems = [e for e in elements if e["type"] in ("picture", "placeholder") and ("image" in e["name"].lower() or "picture" in e["name"].lower())]
+            prod_pic_elems.sort(key=lambda e: e["left"])
+
+            detected_slots = []
+            if prod_text_elems:
+                for idx, te in enumerate(prod_text_elems):
+                    matching_pic = next((pe for pe in prod_pic_elems if abs(pe["left"] - te["left"]) < 80), None)
+                    if matching_pic:
+                        img_rect = [matching_pic["left"], matching_pic["top"], matching_pic["left"] + matching_pic["width"], matching_pic["top"] + matching_pic["height"]]
+                    else:
+                        img_rect = [te["left"], max(35, te["top"] - 250), te["left"] + te["width"], max(55, te["top"] - 12)]
+                    detected_slots.append({
+                        "slot_index": idx,
+                        "text_elem_id": te["id"],
+                        "text_elem_name": te["name"],
+                        "text_rect": [te["left"], te["top"], te["left"] + te["width"], te["top"] + te["height"]],
+                        "img_rect": img_rect,
+                        "template_text": te["text"]
+                    })
+
+            slides_data.append({
+                "slide_index": s_idx,
+                "layout_name": slide.slide_layout.name,
+                "elements": elements,
+                "slots_count": len(detected_slots),
+                "slots": detected_slots,
+                "is_product_slide": len(detected_slots) > 0
+            })
+
+        best_slide = next((s["slide_index"] for s in slides_data if s["is_product_slide"]), 0)
+        return {
+            "slide_width_in": round(w_in, 2),
+            "slide_height_in": round(h_in, 2),
+            "aspect_ratio": aspect_ratio,
+            "total_slides": len(slides_data),
+            "slides": slides_data,
+            "recommended_product_slide": best_slide
+        }
+
+
 @app.post("/api/excel-to-ppt")
 async def excel_to_ppt(
     excel: Annotated[UploadFile, File()],
     mapping: Annotated[str, Form()],
     layout: Annotated[str, Form()],
     style: Annotated[str, Form()],
+    template_pptx: UploadFile | None = File(default=None),
     logo: UploadFile | None = File(default=None),
 ):
     """Build a product catalogue presentation from an XLSX workbook and its embedded cell images."""
@@ -173,29 +322,32 @@ async def excel_to_ppt(
         style_data = json.loads(style)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid mapping, layout, or style settings.")
-    if not isinstance(slots, list) or not 1 <= len(slots) <= 6:
-        raise HTTPException(400, "Choose between 1 and 6 product slots per slide.")
-    try:
-        for slot in slots:
-            for rect_name in ("img", "text"):
-                rect = slot[rect_name]
-                if len(rect) != 4:
-                    raise ValueError()
-                x1, y1, x2, y2 = [float(v) for v in rect]
-                if not (0 <= x1 < x2 <= 800 and 0 <= y1 < y2 <= 450):
-                    raise ValueError()
-        font_size = max(8, min(48, int(style_data.get("font_size", 18))))
-        font_name = str(style_data.get("font_name", "Arial"))[:80]
-        font_color = str(style_data.get("font_color", "000000")).replace("#", "").upper()
-        background_color = str(style_data.get("background_color", "FFFFFF")).replace("#", "").upper()
-        aspect_ratio = str(style_data.get("aspect_ratio", "16:9"))
-        ratio_map = {"16:9": 16 / 9, "4:3": 4 / 3, "A4 Landscape": 297 / 210, "A4 Portrait": 210 / 297}
-        if aspect_ratio not in ratio_map:
-            raise ValueError()
-        if not re.fullmatch(r"[0-9A-F]{6}", font_color) or not re.fullmatch(r"[0-9A-F]{6}", background_color):
-            raise ValueError()
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(400, "Invalid layout coordinates or style settings. Coordinates must fit within 800 × 450.")
+
+    has_custom_template = template_pptx is not None and bool(getattr(template_pptx, "filename", None))
+    if not has_custom_template:
+        if not isinstance(slots, list) or not 1 <= len(slots) <= 6:
+            raise HTTPException(400, "Choose between 1 and 6 product slots per slide.")
+        try:
+            for slot in slots:
+                for rect_name in ("img", "text"):
+                    rect = slot[rect_name]
+                    if len(rect) != 4:
+                        raise ValueError()
+                    x1, y1, x2, y2 = [float(v) for v in rect]
+                    if not (0 <= x1 < x2 <= 800 and 0 <= y1 < y2 <= 450):
+                        raise ValueError()
+            font_size = max(8, min(48, int(style_data.get("font_size", 18))))
+            font_name = str(style_data.get("font_name", "Arial"))[:80]
+            font_color = str(style_data.get("font_color", "000000")).replace("#", "").upper()
+            background_color = str(style_data.get("background_color", "FFFFFF")).replace("#", "").upper()
+            aspect_ratio = str(style_data.get("aspect_ratio", "16:9"))
+            ratio_map = {"16:9": 16 / 9, "4:3": 4 / 3, "A4 Landscape": 297 / 210, "A4 Portrait": 210 / 297}
+            if aspect_ratio not in ratio_map:
+                raise ValueError()
+            if not re.fullmatch(r"[0-9A-F]{6}", font_color) or not re.fullmatch(r"[0-9A-F]{6}", background_color):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Invalid layout coordinates or style settings. Coordinates must fit within 800 × 450.")
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -207,11 +359,22 @@ async def excel_to_ppt(
             raise HTTPException(400, "Cannot read Excel workbook: " + str(exc))
         if not wb.worksheets:
             raise HTTPException(400, "Workbook contains no worksheets.")
-        ws = wb.active
+
+        sheet_name = style_data.get("sheet_name")
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+
+        # Extract headers (check row 1 and row 2 for multi-row headers)
         headers = {}
         for cell in ws[1]:
             if cell.value is not None:
                 headers[str(cell.value).strip().casefold()] = cell.column
+        if len(headers) < 2 and ws.max_row >= 2:
+            for cell in ws[2]:
+                if cell.value is not None:
+                    headers[str(cell.value).strip().casefold()] = cell.column
 
         def mapped_col(role, *fallbacks):
             selected = str(mapping_data.get(role) or "").strip().casefold()
@@ -222,17 +385,20 @@ async def excel_to_ppt(
                     return headers[fallback]
             return None
 
-        code_col = mapped_col("code", "sku", "item code", "product code", "code")
-        desc_col = mapped_col("description", "description", "product name", "product", "desc")
+        code_col = mapped_col("code", "sku", "buyer code", "item code", "product code", "code")
+        desc_col = mapped_col("description", "description", "product name", "product", "item name", "desc")
         price_col = mapped_col("price", "price", "mrp", "rate")
         length_col = mapped_col("length", "length", "l")
         width_col = mapped_col("width", "width", "breadth", "w")
         height_col = mapped_col("height", "height", "h")
-        image_col = mapped_col("image", "image", "photo", "picture", "img")
+        dim_cm_col = mapped_col("dim_cm", "product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)")
+        dim_in_col = mapped_col("dim_in", "carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (in)")
+        image_col = mapped_col("image", "image", "photo", "picture", "img", "product image")
+
         if not code_col:
             wb.close()
             raise HTTPException(400, "Map a product code / SKU column.")
-        
+
         # openpyxl keeps worksheet pictures anchored to zero-based row/column coordinates.
         image_by_cell = {}
         try:
@@ -253,19 +419,47 @@ async def excel_to_ppt(
             value = ws.cell(row=row_number, column=column_number).value
             return "" if value is None else str(value).strip()
 
+        start_row = 2
+        if ws.max_row >= 3 and not cell_value(2, code_col) and cell_value(3, code_col):
+            start_row = 3
+
         products = []
-        for row_number in range(2, ws.max_row + 1):
+        for row_number in range(start_row, ws.max_row + 1):
             code = cell_value(row_number, code_col)
             if not code:
                 continue
+            desc = cell_value(row_number, desc_col)
+            pr = cell_value(row_number, price_col)
+            l_v = cell_value(row_number, length_col)
+            w_v = cell_value(row_number, width_col)
+            h_v = cell_value(row_number, height_col)
+            d_cm = cell_value(row_number, dim_cm_col)
+            d_in = cell_value(row_number, dim_in_col)
+
+            if not d_cm and l_v and w_v and h_v:
+                d_cm = f"{l_v} x {w_v} x {h_v} CM"
+            elif d_cm and not d_cm.upper().endswith("CM"):
+                d_cm = f"{d_cm} CM"
+
+            if not d_in and l_v and w_v and h_v:
+                try:
+                    dims_in_calc = [round(float(v) / 2.54, 1) for v in (l_v, w_v, h_v)]
+                    d_in = " x ".join(str(v) for v in dims_in_calc) + " IN"
+                except Exception:
+                    pass
+            elif d_in and not d_in.upper().endswith("IN"):
+                d_in = f"{d_in} IN"
+
             products.append({
                 "row": row_number,
                 "code": code,
-                "description": cell_value(row_number, desc_col),
-                "price": cell_value(row_number, price_col),
-                "length": cell_value(row_number, length_col),
-                "width": cell_value(row_number, width_col),
-                "height": cell_value(row_number, height_col),
+                "description": desc,
+                "price": pr,
+                "length": l_v,
+                "width": w_v,
+                "height": h_v,
+                "dim_cm": d_cm,
+                "dim_in": d_in,
                 "picture": image_by_cell.get(row_number),
             })
         if not products:
@@ -275,6 +469,185 @@ async def excel_to_ppt(
             wb.close()
             raise HTTPException(400, "This workbook has more than 5,000 products. Split it into smaller workbooks.")
 
+        image_fit = str(style_data.get("image_fit", "contain")).lower()
+        if image_fit not in {"contain", "cover"}:
+            image_fit = "contain"
+
+        # -------------------------------------------------------------
+        # BRANCH A: Custom PowerPoint Template (.pptx) Uploaded
+        # -------------------------------------------------------------
+        if has_custom_template:
+            t_path = root / safe_name(template_pptx.filename or "template.pptx")
+            t_path.write_bytes(await template_pptx.read())
+            try:
+                prs = Presentation(t_path)
+            except Exception as e:
+                wb.close()
+                raise HTTPException(400, f"Cannot open PowerPoint template: {e}")
+
+            if not prs.slides:
+                wb.close()
+                raise HTTPException(400, "The uploaded PowerPoint template contains no slides.")
+
+            selected_slide_index = int(style_data.get("selected_slide_index", 0))
+            if selected_slide_index >= len(prs.slides) or selected_slide_index < 0:
+                selected_slide_index = 0
+            template_slide = prs.slides[selected_slide_index]
+
+            text_slots = []
+            for s in template_slide.shapes:
+                if s.has_text_frame and re.search(r"\b(SKU|Item\s*Name|Price|CM|IN|Dimensions?)\b", s.text_frame.text, re.I):
+                    text_slots.append(s)
+
+            if not text_slots:
+                text_slots = [s for s in template_slide.shapes if s.has_text_frame and s.text_frame.text.strip()]
+            text_slots.sort(key=lambda s: s.left)
+
+            slots_count = len(text_slots) if text_slots else 1
+            if isinstance(slots, list) and len(slots) > 0:
+                slots_count = len(slots)
+
+            slot_configs = []
+            slide_w_emu = prs.slide_width
+            slide_h_emu = prs.slide_height
+
+            for idx, ts in enumerate(text_slots):
+                custom_slot = slots[idx] if (isinstance(slots, list) and idx < len(slots)) else None
+                if custom_slot and "img" in custom_slot and len(custom_slot["img"]) == 4:
+                    img_rect = custom_slot["img"]
+                    img_l = Inches((img_rect[0] / 800) * (slide_w_emu / 914400.0))
+                    img_t = Inches((img_rect[1] / 450) * (slide_h_emu / 914400.0))
+                    img_w = Inches(((img_rect[2] - img_rect[0]) / 800) * (slide_w_emu / 914400.0))
+                    img_h = Inches(((img_rect[3] - img_rect[1]) / 450) * (slide_h_emu / 914400.0))
+                else:
+                    img_l = ts.left
+                    img_t = Inches(0.8)
+                    img_w = ts.width
+                    img_h = max(Inches(1.0), ts.top - Inches(0.9))
+
+                slot_configs.append({
+                    "text_left": ts.left,
+                    "text_top": ts.top,
+                    "text_width": ts.width,
+                    "text_height": ts.height,
+                    "img_left": img_l,
+                    "img_top": img_t,
+                    "img_width": img_w,
+                    "img_height": img_h
+                })
+
+            total_slides_needed = (len(products) + slots_count - 1) // slots_count
+            slides = [template_slide]
+            for _ in range(total_slides_needed - 1):
+                slides.append(duplicate_slide(prs, template_slide))
+
+            for idx, prod in enumerate(products):
+                slide_idx = idx // slots_count
+                slot_idx = idx % slots_count
+                slide = slides[slide_idx]
+                cfg = slot_configs[slot_idx] if slot_idx < len(slot_configs) else slot_configs[0]
+
+                target_text_shape = None
+                for s in slide.shapes:
+                    if s.has_text_frame and abs(s.left - cfg["text_left"]) < Inches(0.15):
+                        target_text_shape = s
+                        break
+                if not target_text_shape:
+                    for s in slide.shapes:
+                        if s.has_text_frame and s.left == cfg["text_left"]:
+                            target_text_shape = s
+                            break
+
+                if target_text_shape:
+                    tf = target_text_shape.text_frame
+                    tf.word_wrap = True
+                    tf.clear()
+
+                    p1 = tf.paragraphs[0]
+                    p1.alignment = PP_ALIGN.LEFT
+                    r1_sku = p1.add_run()
+                    r1_sku.text = f"{prod['code']} | "
+                    r1_sku.font.name = "Calibri"
+                    r1_sku.font.size = Pt(11)
+                    r1_sku.font.bold = True
+
+                    r1_desc = p1.add_run()
+                    r1_desc.text = prod["description"]
+                    r1_desc.font.name = "Calibri"
+                    r1_desc.font.size = Pt(11)
+                    r1_desc.font.bold = False
+
+                    dim_parts = [p for p in (prod["dim_cm"], prod["dim_in"]) if p]
+                    if dim_parts:
+                        p2 = tf.add_paragraph()
+                        p2.alignment = PP_ALIGN.LEFT
+                        r2 = p2.add_run()
+                        r2.text = " | ".join(dim_parts)
+                        r2.font.name = "Calibri"
+                        r2.font.size = Pt(10)
+                        r2.font.bold = True
+
+                    if prod["price"]:
+                        p3 = tf.add_paragraph()
+                        p3.alignment = PP_ALIGN.LEFT
+                        r3 = p3.add_run()
+                        r3.text = f"PRICE : {prod['price']}"
+                        r3.font.name = "Calibri"
+                        r3.font.size = Pt(10)
+                        r3.font.bold = True
+
+                if prod["picture"] is not None:
+                    try:
+                        img_bytes = prod["picture"]._data()
+                        image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+                        tw = max(50, int((cfg["img_width"] / 914400.0) * 300))
+                        th = max(50, int((cfg["img_height"] / 914400.0) * 300))
+
+                        if image_fit == "cover":
+                            fitted = ImageOps.fit(image, (tw, th), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+                        else:
+                            contained = ImageOps.contain(image, (tw, th), method=Image.Resampling.LANCZOS)
+                            fitted = Image.new("RGBA", (tw, th), (255, 255, 255, 0))
+                            paste_x = (tw - contained.width) // 2
+                            paste_y = (th - contained.height) // 2
+                            fitted.alpha_composite(contained, (paste_x, paste_y))
+
+                        img_buf = io.BytesIO()
+                        fitted.save(img_buf, format="PNG")
+                        img_buf.seek(0)
+
+                        slide.shapes.add_picture(
+                            img_buf,
+                            cfg["img_left"],
+                            cfg["img_top"],
+                            width=cfg["img_width"],
+                            height=cfg["img_height"]
+                        )
+                    except Exception as err:
+                        print(f"Warning: could not insert image for product {prod['code']}: {err}")
+
+            if len(products) % slots_count != 0:
+                last_slide = slides[-1]
+                used_slots_on_last = len(products) % slots_count
+                for unused_idx in range(used_slots_on_last, len(slot_configs)):
+                    unused_cfg = slot_configs[unused_idx]
+                    for s in last_slide.shapes:
+                        if s.has_text_frame and abs(s.left - unused_cfg["text_left"]) < Inches(0.15):
+                            s.text_frame.clear()
+                            break
+
+            wb.close()
+            output = root / "product_catalogue.pptx"
+            prs.save(output)
+            return StreamingResponse(
+                io.BytesIO(output.read_bytes()),
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                headers={"Content-Disposition": 'attachment; filename="product_catalogue.pptx"'}
+            )
+
+        # -------------------------------------------------------------
+        # BRANCH B: Built-in Blank Template (Original Working Mode)
+        # -------------------------------------------------------------
         prs = Presentation()
         slide_width_in = 8.0
         slide_height_in = slide_width_in / ratio_map[aspect_ratio]
@@ -285,7 +658,7 @@ async def excel_to_ppt(
         show_header = bool(style_data.get("show_header", True))
         show_rule = bool(style_data.get("show_rule", True))
         logo_bytes = None
-        if logo is not None and logo.filename:
+        if logo is not None and getattr(logo, "filename", None):
             logo_ext = Path(logo.filename).suffix.lower()
             if logo_ext not in {".png", ".jpg", ".jpeg", ".webp"}:
                 wb.close()
@@ -295,9 +668,7 @@ async def excel_to_ppt(
                 wb.close()
                 raise HTTPException(400, "Logo must be 5 MB or smaller.")
         auto_center_image = bool(style_data.get("auto_center_image", True))
-        image_fit = str(style_data.get("image_fit", "contain"))
-        if image_fit not in {"contain", "cover"}:
-            image_fit = "contain"
+
         for product_index, product in enumerate(products):
             slot_index = product_index % len(slots)
             if slot_index == 0:
@@ -332,16 +703,15 @@ async def excel_to_ppt(
             if product["picture"] is not None:
                 try:
                     img_bytes = product["picture"]._data()
-                    from PIL import Image, ImageOps
                     image = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
                     box_w = max(1, int(float(slot["img"][2]) - float(slot["img"][0])))
                     box_h = max(1, int(float(slot["img"][3]) - float(slot["img"][1])))
                     if image_fit == "cover":
                         fitted = ImageOps.fit(image, (box_w * 2, box_h * 2), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
                     else:
-                        fitted = Image.new("RGBA", (box_w * 2, box_h * 2), (255,255,255,0))
+                        fitted = Image.new("RGBA", (box_w * 2, box_h * 2), (255, 255, 255, 0))
                         contained = ImageOps.contain(image, (box_w * 2, box_h * 2), method=Image.Resampling.LANCZOS)
-                        fitted.alpha_composite(contained, ((fitted.width-contained.width)//2, (fitted.height-contained.height)//2))
+                        fitted.alpha_composite(contained, ((fitted.width - contained.width) // 2, (fitted.height - contained.height) // 2))
                     image_buffer = io.BytesIO()
                     fitted.save(image_buffer, format="PNG")
                     image_buffer.seek(0)
@@ -368,7 +738,9 @@ async def excel_to_ppt(
             text_frame.word_wrap = True
             line1 = product["code"] + (" | " + product["description"] if product["description"] else "")
             dimensions = ""
-            if product["length"] and product["width"] and product["height"]:
+            if product["dim_cm"]:
+                dimensions = product["dim_cm"] + (" | " + product["dim_in"] if product["dim_in"] else "")
+            elif product["length"] and product["width"] and product["height"]:
                 dimensions = f'{product["length"]} x {product["width"]} x {product["height"]}'
                 try:
                     dims_in = [round(float(v) / 2.54, 1) for v in (product["length"], product["width"], product["height"])]
@@ -387,14 +759,17 @@ async def excel_to_ppt(
                 run.text = line
                 run.font.name = font_name
                 run.font.size = Pt(font_size if line_index == 0 else (font_size - 2 if line_index == 1 else font_size - 1))
-                run.font.bold = line_index in (0, len(lines)-1) and (line_index == 0 or len(lines) > 1)
+                run.font.bold = line_index in (0, len(lines) - 1) and (line_index == 0 or len(lines) > 1)
                 run.font.color.rgb = RGBColor.from_string(font_color)
 
         wb.close()
         output = root / "product_catalogue.pptx"
         prs.save(output)
-        from fastapi.responses import FileResponse
-        return StreamingResponse(io.BytesIO(output.read_bytes()), media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation", headers={"Content-Disposition": 'attachment; filename="product_catalogue.pptx"'})
+        return StreamingResponse(
+            io.BytesIO(output.read_bytes()),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            headers={"Content-Disposition": 'attachment; filename="product_catalogue.pptx"'}
+        )
 
 
 @app.post("/api/ppt-excel/extract")
