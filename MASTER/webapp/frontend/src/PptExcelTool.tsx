@@ -517,14 +517,17 @@ export default function PptExcelTool() {
             let parent = sp.parentElement;
             while (parent && parent !== xml.documentElement) {
               if (parent.localName === "grpSp") {
-                const grpXfrm = parent.getElementsByTagNameNS("*", "xfrm")[0];
+                const grpSpPr = Array.from(parent.children).find(c => c.localName === "grpSpPr");
+                const grpXfrm = grpSpPr ? Array.from(grpSpPr.children).find(c => c.localName === "xfrm") : parent.getElementsByTagNameNS("*", "xfrm")[0];
                 if (grpXfrm) {
                   const grpOff = grpXfrm.getElementsByTagNameNS("*", "off")[0];
                   if (grpOff) {
                     const gx = Number(grpOff.getAttribute("x") || 0);
                     const gy = Number(grpOff.getAttribute("y") || 0);
-                    if (gx > 0 && x === 0) x = gx;
-                    if (gy > 0 && y === 0) y = gy;
+                    if (gx !== 0 && x === 0) x = gx;
+                    else if (gx !== 0) x += gx;
+                    if (gy !== 0 && y === 0) y = gy;
+                    else if (gy !== 0) y += gy;
                   }
                 }
                 break;
@@ -604,49 +607,62 @@ export default function PptExcelTool() {
                   .join("/");
 
             let x = 0, y = 0, w = 0, h = 0;
+            // Find enclosing shape or picture element
+            let spNode: Element | null = null;
             let currNode: Node | null = blipNode;
             while (currNode && currNode !== xml) {
-              if (currNode.nodeType === 1) {
-                const el = currNode as Element;
-                const xfrm = el.getElementsByTagNameNS("*", "xfrm")[0];
-                if (xfrm) {
-                  const off = xfrm.getElementsByTagNameNS("*", "off")[0];
-                  const ext = xfrm.getElementsByTagNameNS("*", "ext")[0];
-                  if (off) {
-                    x = Number(off.getAttribute("x") || 0);
-                    y = Number(off.getAttribute("y") || 0);
-                  }
-                  if (ext) {
-                    w = Number(ext.getAttribute("cx") || 0);
-                    h = Number(ext.getAttribute("cy") || 0);
-                  }
-                  break;
-                }
+              if (currNode.nodeType === 1 && ((currNode as Element).localName === "sp" || (currNode as Element).localName === "pic")) {
+                spNode = currNode as Element;
+                break;
               }
               currNode = currNode.parentNode;
             }
 
-            // Also check if inside a group shape with offset
-            let pNode: Node | null = blipNode;
-            while (pNode && pNode !== xml) {
-              if (pNode.nodeType === 1 && (pNode as Element).localName === "grpSp") {
-                const grpEl = pNode as Element;
-                const grpXfrm = grpEl.getElementsByTagNameNS("*", "xfrm")[0];
-                if (grpXfrm) {
-                  const grpOff = grpXfrm.getElementsByTagNameNS("*", "off")[0];
-                  const grpExt = grpXfrm.getElementsByTagNameNS("*", "ext")[0];
-                  if (grpOff && (x === 0 || y === 0)) {
-                    x = Number(grpOff.getAttribute("x") || 0);
-                    y = Number(grpOff.getAttribute("y") || 0);
-                  }
-                  if (grpExt && (w === 0 || h === 0)) {
-                    w = Number(grpExt.getAttribute("cx") || 0);
-                    h = Number(grpExt.getAttribute("cy") || 0);
-                  }
-                }
+            // Check parent grpSp
+            let parentGrp: Element | null = null;
+            let pCurr: Node | null = (spNode || blipNode).parentElement;
+            while (pCurr && pCurr !== xml.documentElement) {
+              if (pCurr.localName === "grpSp") {
+                parentGrp = pCurr as Element;
                 break;
               }
-              pNode = pNode.parentNode;
+              pCurr = pCurr.parentElement;
+            }
+
+            if (parentGrp) {
+              const grpSpPr = Array.from(parentGrp.children).find(c => c.localName === "grpSpPr");
+              const grpXfrm = grpSpPr ? Array.from(grpSpPr.children).find(c => c.localName === "xfrm") : parentGrp.getElementsByTagNameNS("*", "xfrm")[0];
+              if (grpXfrm) {
+                const grpOff = grpXfrm.getElementsByTagNameNS("*", "off")[0];
+                const grpExt = grpXfrm.getElementsByTagNameNS("*", "ext")[0];
+                if (grpOff) {
+                  x = Number(grpOff.getAttribute("x") || 0);
+                  y = Number(grpOff.getAttribute("y") || 0);
+                }
+                if (grpExt) {
+                  w = Number(grpExt.getAttribute("cx") || 0);
+                  h = Number(grpExt.getAttribute("cy") || 0);
+                }
+              }
+            }
+
+            if (w === 0 || h === 0 || (x === 0 && y === 0)) {
+              if (spNode) {
+                const spPr = Array.from(spNode.children).find(c => c.localName === "spPr");
+                const spXfrm = spPr ? Array.from(spPr.children).find(c => c.localName === "xfrm") : spNode.getElementsByTagNameNS("*", "xfrm")[0];
+                if (spXfrm) {
+                  const off = spXfrm.getElementsByTagNameNS("*", "off")[0];
+                  const ext = spXfrm.getElementsByTagNameNS("*", "ext")[0];
+                  if (off && (x === 0 && y === 0)) {
+                    x = Number(off.getAttribute("x") || 0);
+                    y = Number(off.getAttribute("y") || 0);
+                  }
+                  if (ext && (w === 0 || h === 0)) {
+                    w = Number(ext.getAttribute("cx") || 0);
+                    h = Number(ext.getAttribute("cy") || 0);
+                  }
+                }
+              }
             }
 
             rawItems.push({
@@ -751,44 +767,75 @@ export default function PptExcelTool() {
 
           const extractedProducts: ExtractedProduct[] = [];
 
-          slideData.shapes.forEach(s => {
+          type RawProductItem = {
+            shapeId: string;
+            sku: string;
+            name: string;
+            mat: string;
+            l: string;
+            w: string;
+            h: string;
+            lIn: string;
+            wIn: string;
+            hIn: string;
+            desc: string;
+            shape: TextShapeItem;
+          };
+
+          const rawProducts: RawProductItem[] = [];
+          const shapeObjects: { id: string; shape: TextShapeItem }[] = [];
+
+          slideData.shapes.forEach((s, sIdx) => {
             const paras = s.paras;
             const joined = paras.join(" ").trim();
             if (BANNER_RE.test(joined) || /^[A-Z0-9a-z\s]+collection$/i.test(joined)) {
               return;
             }
 
-            let itemCode = "";
+            const codeSkus: string[] = [];
             let name = "";
-            let l = "", w = "", h = "";
-            let lIn = "", wIn = "", hIn = "";
-            let desc = "";
+            const dimSets: { l: string; w: string; h: string; lIn: string; wIn: string; hIn: string; desc: string }[] = [];
             let mat = slideMaterial;
 
             paras.forEach(p => {
-              // 1. Code | Name pattern: e.g. "69210 | Coffee table"
+              // 1. Code | Name pattern: e.g. "69217 /69217A | 10 Seater Dining Table- Option 1"
               const codeNameM = p.match(/^\s*([A-Z0-9\/-]+(?:\s*\/[A-Z0-9\/-]+)?)\s*\|\s*([^|]+)$/);
               if (codeNameM) {
-                itemCode = codeNameM[1].trim();
+                const rawCodes = codeNameM[1].trim();
                 name = codeNameM[2].trim();
+                const parts = rawCodes.split(/[\/,]|(?:\s+and\s+)|\s*&\s*/i).map(x => x.trim()).filter(Boolean);
+                codeSkus.push(...parts);
                 return;
               }
 
-              // 2. Dimensions pattern: e.g. "140 x 60 x 42 CM | 55 x 23 x 16 IN"
+              // 2. Dimensions pattern: e.g. "400 x 100 x 76 CM | 157 x 39 x 30 IN"
               const allDims = [...p.matchAll(/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)(?:\s*(CM|CMS|INCH(?:ES)?|IN))?/gi)];
               if (allDims.length > 0) {
-                l = allDims[0][1];
-                w = allDims[0][2];
-                h = allDims[0][3];
-                if (allDims.length > 1) {
-                  lIn = allDims[1][1];
-                  wIn = allDims[1][2];
-                  hIn = allDims[1][3];
+                const l = allDims[0][1];
+                const w = allDims[0][2];
+                const h = allDims[0][3];
+                let lIn = allDims[1]?.[1] || "";
+                let wIn = allDims[1]?.[2] || "";
+                let hIn = allDims[1]?.[3] || "";
+
+                // Validate inch measurements against CM (prevent erroneous copy-paste, e.g. Bed side inheriting Bed inches)
+                if (l && lIn) {
+                  const cmVal = parseFloat(l);
+                  const inVal = parseFloat(lIn);
+                  const expectedIn = cmVal / 2.54;
+                  if (expectedIn > 0 && Math.abs(inVal - expectedIn) / expectedIn > 0.35) {
+                    lIn = String(Math.round(parseFloat(l) / 2.54));
+                    wIn = String(Math.round(parseFloat(w) / 2.54));
+                    hIn = String(Math.round(parseFloat(h) / 2.54));
+                  }
+                } else if (l && !lIn) {
+                  lIn = String(Math.round(parseFloat(l) / 2.54));
+                  wIn = String(Math.round(parseFloat(w) / 2.54));
+                  hIn = String(Math.round(parseFloat(h) / 2.54));
                 }
-                const parts = p.split("|");
-                if (parts.length > 1) {
-                  desc = parts.slice(1).join(" | ").trim();
-                }
+
+                const rawDesc = lIn ? `${lIn} x ${wIn} x ${hIn} IN` : "";
+                dimSets.push({ l, w, h, lIn, wIn, hIn, desc: rawDesc });
                 return;
               }
 
@@ -800,7 +847,9 @@ export default function PptExcelTool() {
 
               // 4. Labeled fields
               if (/^(?:item\s*code|sku|code|model)\s*[:=-]\s*(.*)$/i.test(p)) {
-                itemCode = p.replace(/^(?:item\s*code|sku|code|model)\s*[:=-]\s*/i, "").trim();
+                const rawCodes = p.replace(/^(?:item\s*code|sku|code|model)\s*[:=-]\s*/i, "").trim();
+                const parts = rawCodes.split(/[\/,]|(?:\s+and\s+)|\s*&\s*/i).map(x => x.trim()).filter(Boolean);
+                codeSkus.push(...parts);
               } else if (/^(?:product\s*name|name|title)\s*[:=-]\s*(.*)$/i.test(p)) {
                 name = p.replace(/^(?:product\s*name|name|title)\s*[:=-]\s*/i, "").trim();
               } else if (/^(?:material|finish|wood|timber)\s*[:=-]\s*(.*)$/i.test(p)) {
@@ -810,48 +859,169 @@ export default function PptExcelTool() {
               }
             });
 
-            if (itemCode || (name && (l || w || h))) {
-              // Pair with closest image using spatial Euclidean distance
+            if (codeSkus.length > 0 || (name && dimSets.length > 0)) {
+              const shapeId = `s_${sIdx}_${s.x}_${s.y}`;
+              if (!shapeObjects.some(so => so.id === shapeId)) {
+                shapeObjects.push({ id: shapeId, shape: s });
+              }
+
+              // Multiple SKUs in shape -> One row per SKU (split combined strings, e.g. 69217 / 69217A)
+              if (codeSkus.length > 1) {
+                codeSkus.forEach((sku, idx) => {
+                  const d = dimSets[idx] || dimSets[0] || { l: "", w: "", h: "", lIn: "", wIn: "", hIn: "", desc: "" };
+                  const fullDesc = [collectionName, d.desc].filter(Boolean).join(" · ").trim();
+                  rawProducts.push({
+                    shapeId,
+                    sku,
+                    name,
+                    mat,
+                    l: d.l,
+                    w: d.w,
+                    h: d.h,
+                    lIn: d.lIn,
+                    wIn: d.wIn,
+                    hIn: d.hIn,
+                    desc: fullDesc,
+                    shape: s
+                  });
+                });
+              } else {
+                const sku = codeSkus[0] || "";
+                if (dimSets.length > 1) {
+                  dimSets.forEach((d, idx) => {
+                    const fullDesc = [collectionName, d.desc].filter(Boolean).join(" · ").trim();
+                    rawProducts.push({
+                      shapeId,
+                      sku: idx === 0 ? sku : `${sku}-${idx + 1}`,
+                      name,
+                      mat,
+                      l: d.l,
+                      w: d.w,
+                      h: d.h,
+                      lIn: d.lIn,
+                      wIn: d.wIn,
+                      hIn: d.hIn,
+                      desc: fullDesc,
+                      shape: s
+                    });
+                  });
+                } else {
+                  const d = dimSets[0] || { l: "", w: "", h: "", lIn: "", wIn: "", hIn: "", desc: "" };
+                  const fullDesc = [collectionName, d.desc].filter(Boolean).join(" · ").trim();
+                  rawProducts.push({
+                    shapeId,
+                    sku,
+                    name,
+                    mat,
+                    l: d.l,
+                    w: d.w,
+                    h: d.h,
+                    lIn: d.lIn,
+                    wIn: d.wIn,
+                    hIn: d.hIn,
+                    desc: fullDesc,
+                    shape: s
+                  });
+                }
+              }
+            }
+          });
+
+          // Optimal Global Shape-to-Photo Pairing (Normalized slide coordinate bipartite matching)
+          const normW = sldWidth > 0 ? sldWidth : 12192000;
+          const normH = sldHeight > 0 ? sldHeight : 6858000;
+          const shapePairs: { shapeId: string; photo: Img; dist: number }[] = [];
+
+          shapeObjects.forEach(so => {
+            const scX = so.shape.x + so.shape.w / 2;
+            const scY = so.shape.y + so.shape.h / 2;
+            candidatePhotos.forEach(im => {
+              const icX = (im.x || 0) + (im.w || 0) / 2;
+              const icY = (im.y || 0) + (im.h || 0) / 2;
+              const dx = (scX - icX) / normW;
+              const dy = (scY - icY) / normH;
+              const dist = dx * dx + dy * dy;
+              shapePairs.push({ shapeId: so.id, photo: im, dist });
+            });
+          });
+
+          shapePairs.sort((a, b) => a.dist - b.dist);
+
+          const shapeToImage = new Map<string, Img>();
+          const assignedPhotoIds = new Set<string>();
+
+          // Step 1: Assign closest unique photo per shape
+          for (const sp of shapePairs) {
+            if (!shapeToImage.has(sp.shapeId) && !assignedPhotoIds.has(sp.photo.id)) {
+              shapeToImage.set(sp.shapeId, sp.photo);
+              assignedPhotoIds.add(sp.photo.id);
+            }
+          }
+
+          // Step 2: Fallback for shapes where count(shapes) > count(unique photos)
+          shapeObjects.forEach(so => {
+            if (!shapeToImage.has(so.id)) {
+              const scX = so.shape.x + so.shape.w / 2;
+              const scY = so.shape.y + so.shape.h / 2;
               let bestImg: Img | null = null;
               let minDist = Infinity;
-              const scX = s.x + s.w / 2;
-              const scY = s.y + s.h / 2;
-
               candidatePhotos.forEach(im => {
                 const icX = (im.x || 0) + (im.w || 0) / 2;
                 const icY = (im.y || 0) + (im.h || 0) / 2;
-                const dist = Math.pow(scX - icX, 2) + Math.pow(scY - icY, 2);
+                const dx = (scX - icX) / normW;
+                const dy = (scY - icY) / normH;
+                const dist = dx * dx + dy * dy;
                 if (dist < minDist) {
                   minDist = dist;
                   bestImg = im;
                 }
               });
-
-              // Clean description: include collection and secondary imperial dimensions if present
-              const fullDesc = [collectionName, desc].filter(Boolean).join(" · ").trim();
-
-              extractedProducts.push({
-                id: uid(),
-                slideNumber: slideData.slideIdx,
-                sourceFile: file.name,
-                itemCode,
-                name,
-                material: mat,
-                length: l,
-                width: w,
-                height: h,
-                lengthCm: l,
-                widthCm: w,
-                heightCm: h,
-                lengthIn: lIn || l,
-                widthIn: wIn || w,
-                heightIn: hIn || h,
-                description: fullDesc,
-                primaryImage: bestImg || candidatePhotos[0] || null,
-                candidateImages: candidatePhotos,
-                rawText: paras.join(" | ")
-              });
+              if (bestImg) {
+                shapeToImage.set(so.id, bestImg);
+              }
             }
+          });
+
+          // Deduplicate rows for multiple camera angles of the same product
+          const seenSkus = new Map<string, ExtractedProduct>();
+          rawProducts.forEach(rp => {
+            const assignedImg = shapeToImage.get(rp.shapeId) || candidatePhotos[0] || null;
+
+            if (rp.sku && seenSkus.has(rp.sku)) {
+              // Same product photographed from multiple camera angles - merge photos
+              const existing = seenSkus.get(rp.sku)!;
+              if (assignedImg && !existing.candidateImages.some(ci => ci.id === assignedImg.id)) {
+                existing.candidateImages.push(assignedImg);
+              }
+              return;
+            }
+
+            const newProd: ExtractedProduct = {
+              id: uid(),
+              slideNumber: slideData.slideIdx,
+              sourceFile: file.name,
+              itemCode: rp.sku,
+              name: rp.name,
+              material: rp.mat,
+              length: rp.l,
+              width: rp.w,
+              height: rp.h,
+              lengthCm: rp.l,
+              widthCm: rp.w,
+              heightCm: rp.h,
+              lengthIn: rp.lIn || rp.l,
+              widthIn: rp.wIn || rp.w,
+              heightIn: rp.hIn || rp.h,
+              description: rp.desc,
+              primaryImage: assignedImg,
+              candidateImages: candidatePhotos,
+              rawText: rp.shape.paras.join(" | ")
+            };
+
+            if (rp.sku) {
+              seenSkus.set(rp.sku, newProd);
+            }
+            extractedProducts.push(newProd);
           });
 
           // Single-product slide handling
