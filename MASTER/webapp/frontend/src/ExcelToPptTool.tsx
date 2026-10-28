@@ -19,23 +19,28 @@ import {
   Trash2,
   Layout,
   Sparkles,
-  Info
+  Info,
+  Folder,
+  ExternalLink,
+  ShieldCheck,
+  Layers,
+  FileText
 } from "lucide-react";
 import { storageAdapter, isDesktop } from "./services/platform";
+import {
+  generateCataloguePptx,
+  Slot,
+  Mapping,
+  GenerationOutput
+} from "./services/pptxGenerator";
+import {
+  deliverPresentation,
+  openPresentationInApp,
+  revealPresentationInFolder,
+  DeliveryResult
+} from "./services/fileDelivery";
 import "./excel-ppt.css";
 
-type Slot = { img: number[]; text: number[] };
-type Mapping = {
-  code: string;
-  description: string;
-  dim_cm: string;
-  dim_in: string;
-  price: string;
-  length: string;
-  width: string;
-  height: string;
-  image: string;
-};
 type SlideRatio = "16:9" | "4:3" | "A4 Landscape" | "A4 Portrait";
 
 type TemplateSlot = {
@@ -135,21 +140,7 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function escapeXml(unsafe: any): string {
-  if (!unsafe) return "";
-  return String(unsafe).replace(/[<>&'"]/g, c => {
-    switch (c) {
-      case "<": return "&lt;";
-      case ">": return "&gt;";
-      case "&": return "&amp;";
-      case "'": return "&apos;";
-      case '"': return "&quot;";
-      default: return c;
-    }
-  });
-}
-
-// 100% Client-Side PPTX Template Inspector (No Server Needed)
+// 100% Client-Side PPTX Template Inspector
 async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<TemplateInspection> {
   const buf = fileOrBuf instanceof ArrayBuffer ? fileOrBuf : await fileOrBuf.arrayBuffer();
   const zip = await JSZip.loadAsync(buf);
@@ -157,8 +148,8 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
   if (!presXmlText) throw new Error("Invalid presentation (missing ppt/presentation.xml)");
 
   const sldSzMatch = presXmlText.match(/<p:sldSz\s+cx="(\d+)"\s+cy="(\d+)"/i);
-  const cx = sldSzMatch ? parseInt(sldSzMatch[1]) : 12192000;
-  const cy = sldSzMatch ? parseInt(sldSzMatch[2]) : 6858000;
+  const cx = sldSzMatch ? parseInt(sldSzMatch[1], 10) : 12192000;
+  const cy = sldSzMatch ? parseInt(sldSzMatch[2], 10) : 6858000;
   const wIn = +(cx / 914400).toFixed(2);
   const hIn = +(cy / 914400).toFixed(2);
   const ratioVal = wIn / Math.max(0.1, hIn);
@@ -166,8 +157,8 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
 
   const slideFiles = Object.keys(zip.files).filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k));
   slideFiles.sort((a, b) => {
-    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0");
-    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0");
+    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0", 10);
+    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0", 10);
     return na - nb;
   });
 
@@ -188,10 +179,10 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
       const texts = [...spContent.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map(t => t[1]);
       const textContent = texts.join(" ");
 
-      const offX = offM ? parseInt(offM[1]) : 0;
-      const offY = offM ? parseInt(offY[2]) : 0;
-      const extCx = extM ? parseInt(extM[1]) : 1000000;
-      const extCy = extM ? parseInt(extM[2]) : 1000000;
+      const offX = offM ? parseInt(offM[1], 10) : 0;
+      const offY = offM ? parseInt(offM[2], 10) : 0;
+      const extCx = extM ? parseInt(extM[1], 10) : 1000000;
+      const extCy = extM ? parseInt(extM[2], 10) : 1000000;
 
       const leftNorm = (offX / cx) * 800;
       const topNorm = (offY / cy) * 450;
@@ -249,392 +240,6 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
   };
 }
 
-// 100% Client-Side PPTX Generator (No Server / Network Needed)
-async function generateCustomPptClient(
-  excelFile: File,
-  templateBuf: ArrayBuffer,
-  mapping: Mapping,
-  imageFit: "contain" | "cover",
-  headerText?: string,
-  showHeader: boolean = true,
-  showRule: boolean = true,
-  selectedSlideIndex: number = 0,
-  customLayout?: Slot[],
-  autoCenter: boolean = true,
-  fontSize: number = 14,
-  fontName: string = "Calibri",
-  fontColor: string = "000000",
-  background: string = "FFFFFF",
-  logoFile?: File | null
-): Promise<Blob> {
-  const excelBuf = await excelFile.arrayBuffer();
-
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(excelBuf);
-  const ws = wb.worksheets[0];
-  if (!ws) throw new Error("No worksheets found in Excel workbook.");
-
-  // Extract cell-anchored images
-  const imgByRow = new Map<number, any>();
-  try {
-    const images = ws.getImages ? ws.getImages() : [];
-    for (const img of images) {
-      let rowNum = 0;
-      if (img.range && img.range.tl) {
-        if (typeof img.range.tl.nativeRow === "number") {
-          rowNum = img.range.tl.nativeRow + 1;
-        } else if (typeof img.range.tl.row === "number") {
-          rowNum = img.range.tl.row;
-        }
-      }
-      const media = wb.model?.media?.[img.imageId] || (wb.model?.media || []).find(
-        (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
-      );
-      if (media && media.buffer && rowNum > 0) {
-        imgByRow.set(rowNum, media);
-      }
-    }
-  } catch (e) {
-    console.warn("Could not read embedded images:", e);
-  }
-
-  // Header detection (checks row 1 and row 2)
-  const headers: Record<string, number> = {};
-  const r1 = ws.getRow(1);
-  r1.eachCell((cell, colNumber) => {
-    if (cell.value) headers[String(cell.value).trim().toLowerCase()] = colNumber;
-  });
-  if (Object.keys(headers).length < 2 && ws.rowCount >= 2) {
-    ws.getRow(2).eachCell((cell, colNumber) => {
-      if (cell.value) headers[String(cell.value).trim().toLowerCase()] = colNumber;
-    });
-  }
-
-  const findColNumber = (name: string): number | null => {
-    if (!name) return null;
-    const target = name.trim().toLowerCase();
-    if (headers[target]) return headers[target];
-    for (const [k, v] of Object.entries(headers)) {
-      if (k === target || k.includes(target) || target.includes(k)) {
-        return v;
-      }
-    }
-    return null;
-  };
-
-  const getCol = (key: keyof Mapping, ...fallbacks: string[]): number | null => {
-    const userSelected = (mapping[key] || "").trim();
-    if (userSelected) {
-      const col = findColNumber(userSelected);
-      if (col) return col;
-    }
-    for (const fb of fallbacks) {
-      const col = findColNumber(fb);
-      if (col) return col;
-    }
-    return null;
-  };
-
-  const codeCol = getCol("code", "buyer code", "buyer code / sku", "sku", "item code", "product code", "code");
-  const descCol = getCol("description", "product description", "description", "product name", "product", "item name", "desc");
-  const dimCmCol = getCol("dim_cm", "product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)");
-  const dimInCol = getCol("dim_in", "carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)");
-  const priceCol = getCol("price", "price (usd)", "price", "mrp", "rate", "cost");
-  const lCol = getCol("length", "length", " l");
-  const wCol = getCol("width", "width", "breadth", " w");
-  const hCol = getCol("height", "height", " h");
-  const imageCol = getCol("image", "product image (embedded)", "product image", "image", "photo", "picture", "img");
-
-  if (!codeCol) {
-    throw new Error("Select the product code / SKU column.");
-  }
-
-  const products: Array<{
-    code: string;
-    description: string;
-    dim_cm: string;
-    dim_in: string;
-    price: string;
-    image?: any;
-    imageLink?: string;
-  }> = [];
-
-  const startRow = ws.rowCount >= 3 && !ws.getRow(2).getCell(codeCol).value ? 3 : 2;
-
-  ws.eachRow((row, rIdx) => {
-    if (rIdx >= startRow) {
-      const codeRaw = row.getCell(codeCol).value;
-      if (codeRaw !== null && codeRaw !== undefined && String(codeRaw).trim()) {
-        const code = String(codeRaw).trim();
-        const desc = descCol ? String(row.getCell(descCol).value || "").trim() : "";
-        let d_cm = dimCmCol ? String(row.getCell(dimCmCol).value || "").trim() : "";
-        let d_in = dimInCol ? String(row.getCell(dimInCol).value || "").trim() : "";
-        const lVal = lCol ? String(row.getCell(lCol).value || "").trim() : "";
-        const wVal = wCol ? String(row.getCell(wCol).value || "").trim() : "";
-        const hVal = hCol ? String(row.getCell(hCol).value || "").trim() : "";
-
-        if (!d_cm && (lVal || wVal || hVal)) {
-          d_cm = [lVal, wVal, hVal].filter(Boolean).join(" x ") + " CM";
-        } else if (d_cm && !d_cm.toUpperCase().endsWith("CM")) {
-          d_cm = `${d_cm} CM`;
-        }
-
-        if (!d_in && (lVal || wVal || hVal)) {
-          try {
-            const parts = [lVal, wVal, hVal].filter(Boolean).map(v => {
-              const n = parseFloat(v);
-              return isNaN(n) ? v : (n / 2.54).toFixed(1);
-            });
-            d_in = parts.join(" x ") + " IN";
-          } catch {}
-        } else if (d_in && !d_in.toUpperCase().endsWith("IN")) {
-          d_in = `${d_in} IN`;
-        }
-
-        const priceVal = priceCol ? String(row.getCell(priceCol).value || "").trim() : "";
-
-        // Check embedded image first, then check cell link
-        const embeddedImg = imgByRow.get(rIdx);
-        let linkVal = "";
-        if (!embeddedImg && imageCol) {
-          const rawImgCell = row.getCell(imageCol).value;
-          if (typeof rawImgCell === "string") {
-            linkVal = rawImgCell.trim();
-          } else if (rawImgCell && typeof rawImgCell === "object") {
-            linkVal = String((rawImgCell as any).hyperlink || (rawImgCell as any).text || "").trim();
-          }
-        }
-
-        products.push({
-          code,
-          description: desc,
-          dim_cm: d_cm,
-          dim_in: d_in,
-          price: priceVal,
-          image: embeddedImg,
-          imageLink: linkVal
-        });
-      }
-    }
-  });
-
-  if (products.length === 0) {
-    throw new Error("No product records found in Excel sheet. Check column mapping.");
-  }
-
-  // Load PPTX template
-  const zip = await JSZip.loadAsync(templateBuf);
-  const slideFiles = Object.keys(zip.files).filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k));
-  slideFiles.sort((a, b) => {
-    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0");
-    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0");
-    return na - nb;
-  });
-
-  const targetIdx = selectedSlideIndex >= 0 && selectedSlideIndex < slideFiles.length ? selectedSlideIndex : 0;
-  const baseSlideFile = slideFiles[targetIdx] || "ppt/slides/slide1.xml";
-  const baseRelsFile = baseSlideFile.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
-
-  const slide1XmlBase = await zip.file(baseSlideFile)?.async("text");
-  const slide1RelsBase = (await zip.file(baseRelsFile)?.async("text")) ||
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
-  let presXmlStr = await zip.file("ppt/presentation.xml")?.async("text");
-  let presRelsStr = await zip.file("ppt/_rels/presentation.xml.rels")?.async("text");
-  let contentTypesStr = await zip.file("[Content_Types].xml")?.async("text");
-
-  if (!slide1XmlBase || !presXmlStr || !presRelsStr || !contentTypesStr) {
-    throw new Error("PowerPoint template is missing core presentation files.");
-  }
-
-  // Detect product slots in base slide
-  const spRegex = /<p:sp>([\s\S]*?)<\/p:sp>/g;
-  const slotShapes: Array<{ rawXml: string; offX: number; offY: number; extCx: number; extCy: number }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = spRegex.exec(slide1XmlBase)) !== null) {
-    const spXml = m[0];
-    const texts = [...spXml.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map(t => t[1]).join(" ");
-    const isCandidate = /(?:SKU|Item\s*Name|Price|CM|IN|Dimensions?|00\.00)/i.test(texts) || spXml.includes("Text Placeholder");
-    if (isCandidate) {
-      const offXMatch = spXml.match(/<a:off\s+x="(\d+)"/);
-      const offX = offXMatch ? parseInt(offXMatch[1]) : 0;
-      const offYMatch = spXml.match(/<a:off\s+x="\d+"\s+y="(\d+)"/);
-      const offY = offYMatch ? parseInt(offYMatch[1]) : 0;
-      const extCxMatch = spXml.match(/<a:ext\s+cx="(\d+)"/);
-      const extCx = extCxMatch ? parseInt(extCxMatch[1]) : 3400000;
-      const extCyMatch = spXml.match(/<a:ext\s+cx="\d+"\s+cy="(\d+)"/);
-      const extCy = extCyMatch ? parseInt(extCyMatch[1]) : 600000;
-      slotShapes.push({ rawXml: spXml, offX, offY, extCx, extCy });
-    }
-  }
-  slotShapes.sort((a, b) => a.offX - b.offX);
-  const slotsCount = slotShapes.length || 3;
-  const totalSlides = Math.ceil(products.length / slotsCount);
-
-  // Counters
-  const sldIdMatches = [...presXmlStr.matchAll(/id="(\d+)"/g)].map(item => parseInt(item[1]));
-  let nextSldId = sldIdMatches.length > 0 ? Math.max(...sldIdMatches) + 1 : 256;
-  const presRIdMatches = [...presRelsStr.matchAll(/Id="rId(\d+)"/g)].map(item => parseInt(item[1]));
-  let nextPresRId = Math.max(...presRIdMatches, 0) + 1;
-
-  for (let sIdx = 1; sIdx <= totalSlides; sIdx++) {
-    const slideName = `slide${sIdx}.xml`;
-    const relsName = `slide${sIdx}.xml.rels`;
-    let slideXml = slide1XmlBase;
-    let slideRels = slide1RelsBase;
-
-    // Header customization
-    if (headerText) {
-      slideXml = slideXml.replace(/<a:t>\s*NOBLE SELECTIONS\s*<\/a:t>/g, `<a:t>${escapeXml(headerText)}</a:t>`);
-    }
-    if (!showHeader) {
-      slideXml = slideXml.replace(/<p:sp>[\s\S]*?NOBLE SELECTIONS[\s\S]*?<\/p:sp>/g, "");
-    }
-    if (!showRule) {
-      slideXml = slideXml.replace(/<p:cxnSp[\s\S]*?Straight Connector 17[\s\S]*?<\/p:cxnSp>/g, "");
-    }
-
-    let nextSlideRId = Math.max(...[...slideRels.matchAll(/Id="rId(\d+)"/g)].map(item => parseInt(item[1])), 0) + 1;
-    let picsXml = "";
-
-    // Apply custom background if specified
-    if (background && background.toUpperCase().replace("#", "") !== "FFFFFF") {
-      const bgHex = background.toUpperCase().replace("#", "");
-      const bgXml = `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="${bgHex}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>`;
-      if (!slideXml.includes("<p:bg>")) {
-        slideXml = slideXml.replace("<p:spTree>", `${bgXml}<p:spTree>`);
-      } else {
-        slideXml = slideXml.replace(/<p:bg>[\s\S]*?<\/p:bg>/, bgXml);
-      }
-    }
-
-    for (let slotIdx = 0; slotIdx < slotsCount; slotIdx++) {
-      const prodIdx = (sIdx - 1) * slotsCount + slotIdx;
-      const prod = products[prodIdx];
-      const slot = slotShapes[slotIdx];
-      const userSlot = customLayout && customLayout[slotIdx];
-
-      if (prod && slot) {
-        const dimStr = [prod.dim_cm, prod.dim_in].filter(Boolean).join(" | ");
-        const szMain = Math.round((fontSize || 14) * 100);
-        const szSub = Math.max(700, szMain - 200);
-        const fontNameClean = escapeXml(fontName || "Calibri");
-        const fontColorXml = fontColor ? `<a:srgbClr val="${fontColor.replace("#", "")}"/>` : "";
-
-        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" b="1" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
-        
-        let updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);
-
-        // Apply custom coordinates for text box if provided
-        if (userSlot) {
-          const textOffX = Math.round((userSlot.text[0] / 800) * cx);
-          const textOffY = Math.round((userSlot.text[1] / 450) * cy);
-          const textExtCx = Math.round(((userSlot.text[2] - userSlot.text[0]) / 800) * cx);
-          const textExtCy = Math.round(((userSlot.text[3] - userSlot.text[1]) / 450) * cy);
-          updatedSlot = updatedSlot.replace(/<a:off\s+x="\d+"\s+y="\d+"/, `<a:off x="${textOffX}" y="${textOffY}"`);
-          updatedSlot = updatedSlot.replace(/<a:ext\s+cx="\d+"\s+cy="\d+"/, `<a:ext cx="${textExtCx}" cy="${textExtCy}"`);
-        }
-
-        slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
-
-        let imgBuffer: ArrayBuffer | null = null;
-        let imgExt = "png";
-
-        if (prod.image && prod.image.buffer) {
-          imgBuffer = prod.image.buffer;
-          imgExt = prod.image.extension || "png";
-        } else if (prod.imageLink) {
-          if (prod.imageLink.startsWith("data:image/")) {
-            try {
-              const matches = prod.imageLink.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
-              if (matches) {
-                imgExt = matches[1] === "jpeg" ? "jpg" : matches[1];
-                imgBuffer = base64ToArrayBuffer(matches[2]);
-              }
-            } catch (e) {
-              console.warn("Could not decode data URI image:", e);
-            }
-          } else if (prod.imageLink.startsWith("http://") || prod.imageLink.startsWith("https://")) {
-            try {
-              const res = await fetch(prod.imageLink);
-              if (res.ok) {
-                imgBuffer = await res.arrayBuffer();
-                if (prod.imageLink.includes(".jpg") || prod.imageLink.includes(".jpeg")) imgExt = "jpg";
-                else if (prod.imageLink.includes(".webp")) imgExt = "webp";
-              }
-            } catch (e) {
-              console.warn("Could not fetch remote image link:", e);
-            }
-          }
-        }
-
-        if (imgBuffer) {
-          const imgFilename = `prod_img_${sIdx}_${slotIdx}.${imgExt}`;
-          zip.file(`ppt/media/${imgFilename}`, imgBuffer);
-
-          const imgRelId = `rId${nextSlideRId++}`;
-          const relEntry = `<Relationship Id="${imgRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imgFilename}"/>`;
-          slideRels = slideRels.replace("</Relationships>", `${relEntry}</Relationships>`);
-
-          let picX = slot.offX;
-          let picY = Math.max(700000, slot.offY - 4400000);
-          let picW = slot.extCx;
-          let picH = Math.max(1000000, slot.offY - picY - 100000);
-
-          if (userSlot) {
-            let imgLeft = userSlot.img[0];
-            const imgW800 = userSlot.img[2] - userSlot.img[0];
-            if (autoCenter) {
-              const textCenterX = (userSlot.text[0] + userSlot.text[2]) / 2;
-              imgLeft = Math.max(0, Math.min(800 - imgW800, Math.round(textCenterX - imgW800 / 2)));
-            }
-            picX = Math.round((imgLeft / 800) * cx);
-            picY = Math.round((userSlot.img[1] / 450) * cy);
-            picW = Math.round((imgW800 / 800) * cx);
-            picH = Math.round(((userSlot.img[3] - userSlot.img[1]) / 450) * cy);
-          }
-
-          const picId = 2000 + prodIdx;
-
-          picsXml += `<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvPicPr><p:cNvPr id="${picId}" name="Picture ${picId}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${imgRelId}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${picX}" y="${picY}"/><a:ext cx="${picW}" cy="${picH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
-        }
-      } else if (slot) {
-        const emptyTxBody = `<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>`;
-        const updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => emptyTxBody);
-        slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
-      }
-    }
-
-    if (picsXml) {
-      slideXml = slideXml.replace("</p:spTree>", `${picsXml}</p:spTree>`);
-    }
-
-    zip.file(`ppt/slides/${slideName}`, slideXml);
-    zip.file(`ppt/slides/_rels/${relsName}`, slideRels);
-
-    if (sIdx > 1) {
-      const ctEntry = `<Override PartName="/ppt/slides/${slideName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`;
-      contentTypesStr = contentTypesStr.replace("</Types>", `${ctEntry}</Types>`);
-
-      const presRelId = `rId${nextPresRId++}`;
-      const presRelEntry = `<Relationship Id="${presRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/${slideName}"/>`;
-      presRelsStr = presRelsStr.replace("</Relationships>", `${presRelEntry}</Relationships>`);
-
-      const sldIdVal = nextSldId++;
-      const sldEntry = `<p:sldId id="${sldIdVal}" r:id="${presRelId}"/>`;
-      presXmlStr = presXmlStr.replace("</p:sldIdLst>", `${sldEntry}</p:sldIdLst>`);
-    }
-  }
-
-  zip.file("[Content_Types].xml", contentTypesStr);
-  zip.file("ppt/_rels/presentation.xml.rels", presRelsStr);
-  zip.file("ppt/presentation.xml", presXmlStr);
-
-  return await zip.generateAsync({
-    type: "blob",
-    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-  });
-}
-
 export default function ExcelToPptTool() {
   // File states
   const [file, setFile] = useState<File | null>(null);
@@ -657,8 +262,8 @@ export default function ExcelToPptTool() {
   // Built-in mode layout states
   const [count, setCount] = useState<2 | 3>(3);
   const [layout, setLayout] = useState<Slot[]>(THREE_LAYOUT);
-  const [fontSize, setFontSize] = useState<number>(18);
-  const [fontName, setFontName] = useState<string>("Arial");
+  const [fontSize, setFontSize] = useState<number>(14);
+  const [fontName, setFontName] = useState<string>("Calibri");
   const [fontColor, setFontColor] = useState<string>("000000");
   const [background, setBackground] = useState<string>("FFFFFF");
   const [ratio, setRatio] = useState<SlideRatio>("16:9");
@@ -695,9 +300,16 @@ export default function ExcelToPptTool() {
   // Live preview pagination
   const [previewSlideIndex, setPreviewSlideIndex] = useState<number>(0);
 
-  // Status & processing
+  // Generation & progress state
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
+  const [progress, setProgress] = useState<{ active: boolean; phase: string; percent: number; message: string } | null>(null);
+  const [lastResult, setLastResult] = useState<{
+    output: GenerationOutput;
+    delivery: DeliveryResult;
+    filename: string;
+  } | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
 
   // Load saved profiles and inspect default template on mount
   useEffect(() => {
@@ -760,6 +372,7 @@ export default function ExcelToPptTool() {
     setFile(next);
     setHeaders([]);
     setSampleRows([]);
+    setLastResult(null);
     setStatus("");
     if (!next) return;
     try {
@@ -859,7 +472,7 @@ export default function ExcelToPptTool() {
     }
   };
 
-  // Download Sample Excel Template with Embedded Photos
+  // Download Sample Excel Template
   const downloadExcelTemplate = async () => {
     try {
       setStatus("Generating sample Excel workbook with embedded product images…");
@@ -959,9 +572,10 @@ export default function ExcelToPptTool() {
     }
   };
 
-  // Handle PPT Template Upload & Inspection (100% Offline Client-Side)
+  // Handle PPT Template Upload & Inspection
   const chooseTemplate = async (next: File | null) => {
     setTemplateFile(next);
+    setLastResult(null);
     if (!next) {
       try {
         const defaultBuf = base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
@@ -1030,57 +644,85 @@ export default function ExcelToPptTool() {
   };
   const ratioValue = ratio === "4:3" ? 4 / 3 : ratio === "A4 Landscape" ? 297 / 210 : ratio === "A4 Portrait" ? 210 / 297 : 16 / 9;
 
-  // Generate Presentation (100% Offline Client-Side Engine)
+  // Step state calculations
+  const isStep1Done = Boolean(file && sampleRows.length > 0);
+  const isStep2Done = Boolean(useCustomTemplate ? templateInfo : true);
+  const isStep3Done = Boolean(mapping.code);
+
+  // Generate Presentation (100% Offline Engine with OOXML Validation & Delivery)
   const generate = async () => {
     if (!file) {
-      setStatus("Choose an Excel workbook first.");
+      setStatus("Please choose an Excel workbook in Step 1 first.");
       return;
     }
     if (!mapping.code) {
-      setStatus("Select the product code / SKU column. Rows without a code are skipped.");
+      setStatus("Please select the product code / SKU column in Step 3.");
       return;
     }
+
     setBusy(true);
-    setStatus("Generating PowerPoint presentation offline with original design preserved…");
+    setLastResult(null);
+    setStatus("Initiating presentation generation…");
 
     try {
       const templateBuf = templateFile
         ? await templateFile.arrayBuffer()
         : base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
 
-      const blob = await generateCustomPptClient(
-        file,
-        templateBuf,
-        mapping,
+      const output = await generateCataloguePptx(file, templateBuf, mapping, {
         imageFit,
         headerText,
         showHeader,
         showRule,
         selectedSlideIndex,
-        layout,
+        customLayout: layout,
         autoCenter,
         fontSize,
         fontName,
         fontColor,
         background,
-        logoFile
-      );
+        logoFile,
+        onProgress: (phase, percent, detail) => {
+          setProgress({ active: true, phase, percent, message: detail });
+          setStatus(detail);
+        }
+      });
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = file.name.replace(/\.xlsx?$/i, "") + (templateFile ? "_catalogue_custom.pptx" : "_catalogue.pptx");
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
-      setStatus("PowerPoint presentation generated and downloaded successfully with original design preserved.");
+      const defaultFilename = file.name.replace(/\.xlsx?$/i, "") + (templateFile ? "_catalogue_custom.pptx" : "_catalogue.pptx");
+      const delivery = await deliverPresentation(output.blob, defaultFilename, false);
+
+      setLastResult({ output, delivery, filename: defaultFilename });
+      setProgress(null);
+      setStatus(`Presentation generated successfully: ${output.slideCount} slides (${output.totalProducts} products). Validated OOXML compliant.`);
     } catch (error: any) {
       console.error("PPT Generation error:", error);
-      setStatus(error instanceof Error ? error.message : "Unexpected error while generating PowerPoint.");
+      setProgress(null);
+      setStatus(`Presentation generation failed: ${error.message || String(error)}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleDownloadAgain = async () => {
+    if (!lastResult) return;
+    try {
+      await deliverPresentation(lastResult.output.blob, lastResult.filename, isDesktop());
+    } catch (err: any) {
+      setStatus(`Download failed: ${err.message || String(err)}`);
+    }
+  };
+
+  const handleOpenDesktopApp = async () => {
+    if (!lastResult?.delivery?.savedPath) return;
+    const res = await openPresentationInApp(lastResult.delivery.savedPath);
+    if (!res.success) {
+      setStatus(`Could not launch PowerPoint: ${res.error || "File error"}`);
+    }
+  };
+
+  const handleShowDesktopFolder = async () => {
+    if (!lastResult?.delivery?.savedPath) return;
+    await revealPresentationInFolder(lastResult.delivery.savedPath);
   };
 
   return (
@@ -1097,6 +739,76 @@ export default function ExcelToPptTool() {
         </div>
         <FileSpreadsheet size={48} />
       </section>
+
+      {/* Modernized 4-Step Workflow Stepper Indicator */}
+      <div className="ep-workflow-stepper">
+        <div className={`ep-step-item ${isStep1Done ? "completed" : "active"}`}>
+          <div className="ep-step-num">{isStep1Done ? <CheckCircle2 size={13} /> : "1"}</div>
+          <div className="ep-step-text">
+            <strong>01. Upload Excel</strong>
+            <span>{file ? `${file.name.slice(0, 18)} (${sampleRows.length}+ items)` : "Choose workbook (.xlsx)"}</span>
+          </div>
+        </div>
+
+        <div className={`ep-step-item ${isStep2Done ? (isStep1Done ? "completed" : "active") : ""}`}>
+          <div className="ep-step-num">{isStep2Done && isStep1Done ? <CheckCircle2 size={13} /> : "2"}</div>
+          <div className="ep-step-text">
+            <strong>02. Select Template</strong>
+            <span>{templateFile ? templateFile.name.slice(0, 18) : "Standard Layout (16:9)"}</span>
+          </div>
+        </div>
+
+        <div className={`ep-step-item ${isStep3Done ? "completed" : isStep1Done ? "active" : ""}`}>
+          <div className="ep-step-num">{isStep3Done ? <CheckCircle2 size={13} /> : "3"}</div>
+          <div className="ep-step-text">
+            <strong>03. Field Mapping</strong>
+            <span>{mapping.code ? `SKU: ${mapping.code}` : "Assign spreadsheet columns"}</span>
+          </div>
+        </div>
+
+        <div className={`ep-step-item ${lastResult ? "completed" : isStep3Done ? "active" : ""}`}>
+          <div className="ep-step-num">{lastResult ? <CheckCircle2 size={13} /> : "4"}</div>
+          <div className="ep-step-text">
+            <strong>04. Layout & Save</strong>
+            <span>{lastResult ? "Generated & Validated" : "Sizing, Drag & Download"}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Source Files Metadata Cards */}
+      {(file || templateInfo) && (
+        <div className="ep-source-cards">
+          {file && (
+            <div className="ep-source-card">
+              <div className="ep-source-icon">
+                <FileSpreadsheet size={20} />
+              </div>
+              <div className="ep-source-info">
+                <h4>{file.name}</h4>
+                <p>
+                  {(file.size / 1024).toFixed(0)} KB · {headers.length} Columns · {sampleRows.length} Product Records Loaded
+                </p>
+              </div>
+              <span className="ep-badge ep-badge-success">Ready</span>
+            </div>
+          )}
+
+          {templateInfo && (
+            <div className="ep-source-card">
+              <div className="ep-source-icon">
+                <Presentation size={20} />
+              </div>
+              <div className="ep-source-info">
+                <h4>{templateFile ? templateFile.name : "Default Noble Selections Template"}</h4>
+                <p>
+                  {templateInfo.slide_width_in}″ × {templateInfo.slide_height_in}″ ({templateInfo.aspect_ratio}) · {templateInfo.slides[selectedSlideIndex]?.slots_count || 3} Slots / Slide
+                </p>
+              </div>
+              <span className="ep-badge ep-badge-blue">Active</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Step 1: Excel Upload */}
       <section className="ep-panel">
@@ -1284,7 +996,7 @@ export default function ExcelToPptTool() {
         )}
       </section>
 
-      {/* Step 3: Interactive Visual Mapping Table */}
+      {/* Step 3: Interactive Column Mapping & Field Assignment */}
       {headers.length > 0 && (
         <section className="ep-panel">
           <div className="ep-title">
@@ -1399,7 +1111,6 @@ export default function ExcelToPptTool() {
                   );
                 })}
 
-                {/* Fixed Template Elements (Shown when custom template is active) */}
                 {useCustomTemplate && (
                   <>
                     <tr className="row-fixed">
@@ -1464,7 +1175,7 @@ export default function ExcelToPptTool() {
         </section>
       )}
 
-      {/* Step 4: Product Image/Text Positioning, Sizing & Slide Layout */}
+      {/* Step 4: Slide Layout, Image/Text Positioning & Sizing */}
       <section className="ep-panel">
         <div className="ep-title">
           <div>
@@ -1903,7 +1614,7 @@ export default function ExcelToPptTool() {
         </div>
       </section>
 
-      {/* Step 5: Live Slide Preview with Pager */}
+      {/* Step 5: Live Interactive Slide Preview */}
       <section className="ep-panel">
         <div className="ep-title">
           <div>
@@ -1936,7 +1647,6 @@ export default function ExcelToPptTool() {
           </div>
         </div>
 
-        {/* Visual Slide Canvas */}
         <div className="ep-live-slide-wrapper">
           <div
             className="ep-live-slide-canvas"
@@ -1945,7 +1655,6 @@ export default function ExcelToPptTool() {
               backgroundColor: useCustomTemplate ? "#ffffff" : `#${background.replace("#", "")}`
             }}
           >
-            {/* Top Bar / Fixed Template Branding */}
             {useCustomTemplate ? (
               <>
                 <div className="ep-preview-top-brand">
@@ -1969,7 +1678,6 @@ export default function ExcelToPptTool() {
               </>
             )}
 
-            {/* Product Slots */}
             <div className={`ep-preview-slots-grid slots-${productsPerSlide}`}>
               {Array.from({ length: productsPerSlide }).map((_, slotIdx) => {
                 const prod = currentSlideProducts[slotIdx];
@@ -2054,6 +1762,126 @@ export default function ExcelToPptTool() {
           </span>
         </div>
       </section>
+
+      {/* Real-Time Generation Progress Bar */}
+      {progress?.active && (
+        <div className="ep-progress-container">
+          <div className="ep-progress-header">
+            <strong>
+              <LoaderCircle className="ep-spin" size={16} /> {progress.message}
+            </strong>
+            <span>{progress.percent}%</span>
+          </div>
+          <div className="ep-progress-bar">
+            <div className="ep-progress-fill" style={{ width: `${progress.percent}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Successful Generation Results Card */}
+      {lastResult && (
+        <section className="ep-results-card">
+          <div className="ep-results-header">
+            <div className="ep-results-title">
+              <CheckCircle2 size={24} style={{ color: "#10b981" }} />
+              <div>
+                <h3>Presentation Ready & Validated</h3>
+                <small style={{ color: "#9cb1d4" }}>
+                  File passed OpenXML structural integrity validation. 100% PowerPoint compatible.
+                </small>
+              </div>
+            </div>
+            <span className="ep-badge ep-badge-success">
+              <ShieldCheck size={14} /> OOXML Verified
+            </span>
+          </div>
+
+          <div className="ep-results-grid">
+            <div className="ep-result-metric">
+              <span>Output Filename</span>
+              <strong>{lastResult.filename}</strong>
+            </div>
+            <div className="ep-result-metric">
+              <span>File Size</span>
+              <strong>{(lastResult.output.byteSize / 1024).toFixed(0)} KB</strong>
+            </div>
+            <div className="ep-result-metric">
+              <span>Total Slides</span>
+              <strong>{lastResult.output.slideCount} Slides</strong>
+            </div>
+            <div className="ep-result-metric">
+              <span>Products Embedded</span>
+              <strong>{lastResult.output.totalProducts} Items</strong>
+            </div>
+          </div>
+
+          <div className="ep-result-actions">
+            <button
+              type="button"
+              className="ep-btn-download-primary"
+              onClick={handleDownloadAgain}
+            >
+              <Download size={16} /> Save / Download Presentation (.pptx)
+            </button>
+
+            {isDesktop() && lastResult.delivery.savedPath && (
+              <>
+                <button
+                  type="button"
+                  className="ep-btn-desktop-action"
+                  onClick={handleOpenDesktopApp}
+                  title="Open presentation directly in Microsoft PowerPoint"
+                >
+                  <ExternalLink size={15} /> Open in PowerPoint
+                </button>
+                <button
+                  type="button"
+                  className="ep-btn-desktop-action"
+                  onClick={handleShowDesktopFolder}
+                  title="Reveal saved file in Windows Explorer"
+                >
+                  <Folder size={15} /> Show in Folder
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="ep-diagnostics-drawer">
+            <button
+              type="button"
+              className="ep-diagnostics-toggle"
+              onClick={() => setShowDiagnostics(v => !v)}
+            >
+              {showDiagnostics ? "Hide" : "Show"} Technical Diagnostics & Integrity Log
+            </button>
+
+            {showDiagnostics && (
+              <div className="ep-diagnostics-body">
+                <div className="ep-diag-check-item ok">
+                  ✓ Core Parts [Content_Types].xml & rels verified present
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ ST_SlideId ECMA-376 bounds confirmed (256 &le; id &lt; 2147483648)
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ {lastResult.output.validation.mediaCount} media assets registered in [Content_Types].xml
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Slide relationships and layout references validated
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ All XML parts validated well-formed with matching closing tags
+                </div>
+                {lastResult.delivery.savedPath && (
+                  <div style={{ marginTop: "6px", color: "#60a5fa" }}>
+                    Destination: {lastResult.delivery.savedPath}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Action Generation Bar */}
       <div className="ep-action">

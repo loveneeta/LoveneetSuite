@@ -196,6 +196,28 @@ function setupIpcHandlers() {
     }
   });
 
+  ipcMain.handle("fs:writeFile", async (event, { targetPath, bufferBase64 }) => {
+    if (!targetPath || !bufferBase64) return { success: false, error: "Invalid path or empty data" };
+    try {
+      const dir = path.dirname(targetPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmpPath = `${targetPath}.${Date.now()}.tmp`;
+      const buf = Buffer.from(bufferBase64, "base64");
+      await fs.promises.writeFile(tmpPath, buf);
+      await fs.promises.rename(tmpPath, targetPath);
+      const stat = await fs.promises.stat(targetPath);
+      return { success: true, size: stat.size, path: targetPath };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle("fs:showItemInFolder", (event, fullPath) => {
+    if (!fullPath) return false;
+    shell.showItemInFolder(fullPath);
+    return true;
+  });
+
   ipcMain.handle("fs:exists", (event, targetPath) => {
     if (!targetPath) return false;
     return fs.existsSync(targetPath);

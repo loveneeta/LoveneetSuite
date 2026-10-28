@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "test": "node --test src/__tests__/test_excel_ppt.mjs",
+    "test:pptx": "node --test src/__tests__/test_excel_ppt.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "desktop:dev": "electron .",
     "desktop:build": "vite build && electron-builder --dir",

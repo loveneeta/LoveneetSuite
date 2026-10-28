@@ -27,6 +27,8 @@ declare global {
       fs: {
         openPath: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
         exists: (targetPath: string) => Promise<boolean>;
+        writeFile?: (targetPath: string, bufferBase64: string) => Promise<{ success: boolean; size?: number; path?: string; error?: string }>;
+        showItemInFolder?: (fullPath: string) => Promise<boolean>;
       };
       db: {
         query: (sql: string, params?: any[]) => Promise<any[]>;

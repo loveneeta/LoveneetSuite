@@ -25,7 +25,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Native Filesystem Helpers
   fs: {
     openPath: (folderPath) => ipcRenderer.invoke("fs:openPath", folderPath),
-    exists: (targetPath) => ipcRenderer.invoke("fs:exists", targetPath)
+    exists: (targetPath) => ipcRenderer.invoke("fs:exists", targetPath),
+    writeFile: (targetPath, bufferBase64) => ipcRenderer.invoke("fs:writeFile", { targetPath, bufferBase64 }),
+    showItemInFolder: (fullPath) => ipcRenderer.invoke("fs:showItemInFolder", fullPath)
   },
 
   // Persistent Local SQLite Database

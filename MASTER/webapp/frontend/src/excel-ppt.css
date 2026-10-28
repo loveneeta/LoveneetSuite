@@ -524,3 +524,314 @@
   color: #04091a !important;
   font-weight: 800;
 }
+
+/* --- Modernized Workflow Stepper & Diagnostics (Phase 4) --- */
+.ep-workflow-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.ep-step-item {
+  background: #0f182a;
+  border: 1px solid #23314d;
+  border-radius: 9px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: all 0.2s ease;
+}
+.ep-step-item.active {
+  border-color: #6688ff;
+  background: linear-gradient(135deg, #132244 0%, #0d172e 100%);
+  box-shadow: 0 0 12px rgba(102, 136, 255, 0.15);
+}
+.ep-step-item.completed {
+  border-color: #2e4d3a;
+  background: #0d1e17;
+}
+.ep-step-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  background: #1b2844;
+  color: #9cb1ff;
+  flex: 0 0 24px;
+}
+.ep-step-item.active .ep-step-num {
+  background: #6688ff;
+  color: #0c1530;
+}
+.ep-step-item.completed .ep-step-num {
+  background: #10b981;
+  color: #ffffff;
+}
+.ep-step-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ep-step-text strong {
+  font-size: 11px;
+  color: #e2e8f8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ep-step-text span {
+  font-size: 10px;
+  color: #7d8ea8;
+}
+
+/* Source Files Summary Cards */
+.ep-source-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.ep-source-card {
+  background: #0c1322;
+  border: 1px solid #202d46;
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ep-source-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #17243e;
+  color: #8ea8ff;
+  flex: 0 0 38px;
+}
+.ep-source-info {
+  flex: 1;
+  min-width: 0;
+}
+.ep-source-info h4 {
+  margin: 0 0 3px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e8f8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ep-source-info p {
+  margin: 0;
+  font-size: 11px;
+  color: #8292ab;
+}
+
+/* Real-Time Progress Bar */
+.ep-progress-container {
+  margin: 16px 0;
+  padding: 14px 16px;
+  background: #0b1322;
+  border: 1px solid #243555;
+  border-radius: 10px;
+}
+.ep-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.ep-progress-header strong {
+  font-size: 12px;
+  color: #e1e9ff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ep-progress-header span {
+  font-size: 11px;
+  font-weight: 700;
+  color: #8ea8ff;
+}
+.ep-progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #15223a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.ep-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6688ff, #99b5ff);
+  border-radius: 4px;
+  transition: width 0.25s ease;
+}
+
+/* Generation Results Card */
+.ep-results-card {
+  margin: 18px 0;
+  padding: 20px;
+  background: linear-gradient(145deg, #0e192c, #0a1120);
+  border: 1px solid #2a3c60;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+}
+.ep-results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.ep-results-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ep-results-title h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: #f0f4ff;
+}
+.ep-results-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.ep-result-metric {
+  background: #090e1a;
+  border: 1px solid #1e2c48;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.ep-result-metric span {
+  display: block;
+  font-size: 10px;
+  color: #7b8ea8;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ep-result-metric strong {
+  font-size: 14px;
+  color: #e2e8f8;
+  font-weight: 700;
+}
+.ep-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ep-btn-download-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  background: linear-gradient(120deg, #6688ff, #4d6ee8);
+  color: #ffffff;
+  border: 1px solid #8ca6ff;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.ep-btn-download-primary:hover {
+  opacity: 0.95;
+}
+.ep-btn-desktop-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 15px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #142036;
+  color: #c4d4f8;
+  border: 1px solid #283958;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ep-btn-desktop-action:hover {
+  background: #1c2e4f;
+  color: #ffffff;
+}
+
+/* Expandable Diagnostics Drawer */
+.ep-diagnostics-drawer {
+  margin-top: 14px;
+  border-top: 1px solid #1e2b44;
+  padding-top: 12px;
+}
+.ep-diagnostics-toggle {
+  background: none;
+  border: none;
+  color: #8ea8ff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+.ep-diagnostics-toggle:hover {
+  text-decoration: underline;
+}
+.ep-diagnostics-body {
+  margin-top: 8px;
+  background: #080d17;
+  border: 1px solid #1a253a;
+  border-radius: 8px;
+  padding: 12px;
+  font-family: monospace;
+  font-size: 10px;
+  color: #9cb1d4;
+  line-height: 1.6;
+}
+.ep-diag-check-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+}
+.ep-diag-check-item.ok {
+  color: #34d399;
+}
+.ep-diag-check-item.warn {
+  color: #fbbf24;
+}
+.ep-diag-check-item.err {
+  color: #f87171;
+}
+
+@media (max-width: 900px) {
+  .ep-workflow-stepper {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .ep-source-cards {
+    grid-template-columns: 1fr;
+  }
+  .ep-results-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .ep-workflow-stepper {
+    grid-template-columns: 1fr;
+  }
+  .ep-results-grid {
+    grid-template-columns: 1fr;
+  }
+}
