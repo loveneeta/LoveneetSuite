@@ -26,6 +26,7 @@ type RowData = {
   SO: string;
   QTY: string;
   ITEM: string;
+  boxCode?: string;
   L: string;
   W: string;
   H: string;
@@ -45,7 +46,7 @@ type RowData = {
   [key: string]: any;
 };
 const blank = (source: string, page = 1): RowData => ({
-  SO: "", QTY: "", ITEM: "", L: "", W: "", H: "", INCH: "inch", PLY: "", TYPE: "",
+  SO: "", QTY: "", ITEM: "", boxCode: "", L: "", W: "", H: "", INCH: "inch", PLY: "", TYPE: "",
   source, page, description: "", cbm: "", price: "", amount: "", leadingRef: "",
   format: "Format A (Classic RFQ)", confidence: "review", reviewReasons: ["Empty row"]
 });
@@ -96,6 +97,7 @@ function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowD
     normalizedFull.match(/\bPurchase\s*Type\b/i) ||
     normalizedFull.match(/\bStock\s*Avl\b/i)
   );
+  const hasFinalP = Boolean(normalizedFull.match(/\bFinal\s*P\b/i));
 
   let mSo = normalizedFull.match(/\bSale\s*Order\s*(?:[:=-]\s*)?(SO\s*\/\s*[A-Z0-9-]+)\b/i);
   if (!mSo) mSo = normalizedFull.match(/\b(SO\s*\/\s*\d{6,})\b/i);
@@ -121,9 +123,10 @@ function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowD
       const to = (i + 1 < matches.length) ? (matches[i + 1].index ?? normP.length) : normP.length;
       const chunk = normP.slice(frm, to);
 
-      const preceding = normP.slice(Math.max(0, frm - 40), frm).trim();
-      const leadRefM = preceding.match(/([A-Z0-9]+)\s*$/i);
-      const leadingRef = (leadRefM && !/(?:Description|Remarks|Amount|Price|Date|Qty)$/i.test(leadRefM[1])) ? leadRefM[1] : "";
+      const preceding = normP.slice(Math.max(0, frm - 60), frm).trim();
+      const leadRefM = preceding.match(/([A-Za-z0-9_-]+)\s*$/i);
+      const ignoreTokens = /^(?:Description|Remarks|Amount|Price|Date|Qty|IGST|SGST|CGST|Rate|Dimension|Head|Desc|Finish|UoM|Dis|Order|Image)$/i;
+      const leadingRef = (leadRefM && !ignoreTokens.test(leadRefM[1])) ? leadRefM[1].trim() : "";
 
       if (/^(?:Terms\s*&|Special\s*Comment|NOT\s*FOR\s*VENDOR|Noble\s*Art)/i.test(chunk)) {
         continue;
@@ -134,7 +137,20 @@ function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowD
       const qty = qtyM ? qtyM[1].replace(/,/g, "").replace(/\.000$/, "") : "";
 
       // 2. Item Code
-      const itemCode = boxCode;
+      // Priority 1: Explicit "ITEM: <code>" inside description / chunk
+      // Priority 2: Leading Product Code from "Final P." column (e.g. 68478, 68223, 68494B)
+      // Priority 3: Fallback to Box Code (e.g. Box-6101)
+      let itemCode = "";
+      const itemPatternMatch = chunk.match(/\bITEM\s*:\s*([A-Za-z0-9_-]+)/i);
+      if (itemPatternMatch && itemPatternMatch[1] && !/^(?:Size|Ref|Price|\d+LBS|PRINTED|V2H2|DF|SF)$/i.test(itemPatternMatch[1])) {
+        itemCode = itemPatternMatch[1].trim();
+      }
+      if (!itemCode && leadingRef) {
+        itemCode = leadingRef;
+      }
+      if (!itemCode) {
+        itemCode = boxCode;
+      }
 
       // 3. Ply
       const plyM = chunk.match(/\b([357])\s*[- ]?\s*PLY\b/i);
@@ -202,6 +218,7 @@ function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowD
         SO: docSo,
         QTY: qty,
         ITEM: itemCode,
+        boxCode: boxCode,
         L: l,
         W: w,
         H: h,
@@ -257,7 +274,7 @@ function parseRfqPages(pagesData: PdfPageData[], filename: string): { rows: RowD
   }
 
   const unique = new Map<string, RowData>();
-  rows.forEach(r => unique.set([r.source, r.SO, r.ITEM, r.QTY, r.L, r.W, r.H, r.PLY, r.TYPE].join("|"), r));
+  rows.forEach(r => unique.set([r.source, r.page || 1, r.SO, r.ITEM, r.boxCode || "", r.QTY, r.L, r.W, r.H, r.PLY, r.TYPE].join("|"), r));
   return { rows: [...unique.values()], format: formatLabel };
 }
 async function pdfText(file: File, setStatus: (s: string) => void): Promise<{ pages: PdfPageData[]; fullText: string }> {
@@ -542,6 +559,11 @@ function PdfExcelTool() {
                         {r.source.length > 20 ? r.source.slice(0, 18) + "…" : r.source} (p.{r.page || 1})
                       </td>
                       <td className="pdf-desc-cell" title={r.description}>
+                        {r.boxCode && r.boxCode !== r.ITEM ? (
+                          <span style={{ marginRight: 6, fontWeight: 700, color: "#38bdf8", background: "rgba(56, 189, 248, 0.15)", padding: "2px 6px", borderRadius: 4, display: "inline-block", fontSize: 11 }}>
+                            {r.boxCode}
+                          </span>
+                        ) : null}
                         {r.description || "-"}
                       </td>
                       {IMPORT_HEADERS.map(h => (
