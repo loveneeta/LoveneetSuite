@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { DEFAULT_PPT_TEMPLATE_B64 } from "./defaultPptTemplate";
@@ -29,10 +29,18 @@ import {
 import { storageAdapter, isDesktop } from "./services/platform";
 import {
   generateCataloguePptx,
-  Slot,
   Mapping,
   GenerationOutput
 } from "./services/pptxGenerator";
+import {
+  Slot,
+  ProductsPerSlide,
+  DEFAULT_LAYOUT,
+  THREE_LAYOUT,
+  adjustLayoutSlots,
+  chunkProducts,
+  calculateSlideCount
+} from "./services/layoutConfig";
 import {
   deliverPresentation,
   openPresentationInApp,
@@ -89,17 +97,9 @@ type MappingProfile = {
   mapping: Mapping;
   imageFit: "contain" | "cover";
   selectedSlideIndex: number;
+  count?: ProductsPerSlide;
+  layout?: Slot[];
 };
-
-const DEFAULT_LAYOUT: Slot[] = [
-  { img: [80, 130, 230, 230], text: [40, 310, 350, 390] },
-  { img: [450, 130, 600, 230], text: [430, 310, 760, 390] }
-];
-const THREE_LAYOUT: Slot[] = [
-  { img: [25, 85, 225, 235], text: [15, 260, 250, 345] },
-  { img: [290, 85, 490, 235], text: [280, 260, 515, 345] },
-  { img: [555, 85, 755, 235], text: [545, 260, 780, 345] }
-];
 
 const ROLE_DEFINITIONS: Array<{
   key: keyof Mapping;
@@ -340,7 +340,9 @@ export default function ExcelToPptTool() {
       name,
       mapping: { ...mapping },
       imageFit,
-      selectedSlideIndex
+      selectedSlideIndex,
+      count,
+      layout: layout.map(s => ({ img: [...s.img], text: [...s.text] }))
     };
     const updated = [...profiles.filter(p => p.name.toLowerCase() !== name.toLowerCase()), newProfile];
     setProfiles(updated);
@@ -356,6 +358,15 @@ export default function ExcelToPptTool() {
     setImageFit(p.imageFit);
     setSelectedSlideIndex(p.selectedSlideIndex);
     setSelectedProfileIndex(name);
+    if (p.count) {
+      const targetCount = p.count === 2 ? 2 : 3;
+      setCount(targetCount);
+      if (p.layout && Array.isArray(p.layout)) {
+        setLayout(adjustLayoutSlots(p.layout, targetCount));
+      } else {
+        setLayout(adjustLayoutSlots([], targetCount));
+      }
+    }
     setStatus(`Loaded profile "${name}".`);
   };
 
@@ -595,11 +606,16 @@ export default function ExcelToPptTool() {
 
       const activeSlide = clientData.slides[clientData.recommended_product_slide || 0];
       const slotsDetected = activeSlide ? activeSlide.slots_count : 3;
-      if (slotsDetected === 2 || slotsDetected === 3) {
-        setCount(slotsDetected as 2 | 3);
-      }
+      const validCount: ProductsPerSlide = slotsDetected === 2 ? 2 : 3;
+      setCount(validCount);
       if (activeSlide && activeSlide.slots && activeSlide.slots.length > 0) {
-        setLayout(activeSlide.slots.map(s => ({ img: [...s.img_rect], text: [...s.text_rect] })));
+        const rawSlots: Slot[] = activeSlide.slots.map(s => ({
+          img: [s.img_rect[0], s.img_rect[1], s.img_rect[2], s.img_rect[3]] as [number, number, number, number],
+          text: [s.text_rect[0], s.text_rect[1], s.text_rect[2], s.text_rect[3]] as [number, number, number, number]
+        }));
+        setLayout(adjustLayoutSlots(rawSlots, validCount));
+      } else {
+        setLayout(adjustLayoutSlots([], validCount));
       }
       setStatus(`Template inspected successfully: ${clientData.total_slides} slide(s), ${slotsDetected} product slots per slide.`);
     } catch (clientErr: any) {
@@ -617,28 +633,41 @@ export default function ExcelToPptTool() {
     return val ? String(val) : "—";
   };
 
-  // Calculate products per slide
-  const activeSlideInfo = templateInfo?.slides[selectedSlideIndex];
-  const productsPerSlide = useCustomTemplate && activeSlideInfo ? (activeSlideInfo.slots_count || 3) : count;
-  const totalPreviewSlides = sampleRows.length > 0 ? Math.ceil(sampleRows.length / productsPerSlide) : 1;
+  // Shared Grouping & Slide Count Engine (Phase 2 Fix)
+  // Single source of truth across Canvas, Preview, and PPTX Generator
+  const productChunks = useMemo(() => {
+    return chunkProducts(sampleRows, count);
+  }, [sampleRows, count]);
+
+  const slideCounts = useMemo(() => {
+    return calculateSlideCount(sampleRows.length, count, 0);
+  }, [sampleRows.length, count]);
+
+  const totalPreviewSlides = Math.max(1, slideCounts.productSlides);
 
   // Change slide preview page
   const prevSlide = () => setPreviewSlideIndex(p => Math.max(0, p - 1));
   const nextSlide = () => setPreviewSlideIndex(p => Math.min(totalPreviewSlides - 1, p + 1));
 
-  // Current slide products
-  const currentSlideProducts = sampleRows.slice(
-    previewSlideIndex * productsPerSlide,
-    (previewSlideIndex + 1) * productsPerSlide
-  );
+  // Current slide products from shared grouping engine
+  const currentSlideProducts = useMemo(() => {
+    return productChunks[previewSlideIndex] || [];
+  }, [productChunks, previewSlideIndex]);
 
-  // Layout change handlers for Built-in Mode
+  // Keep preview index valid when totalPreviewSlides changes
+  useEffect(() => {
+    if (previewSlideIndex >= totalPreviewSlides) {
+      setPreviewSlideIndex(Math.max(0, totalPreviewSlides - 1));
+    }
+  }, [previewSlideIndex, totalPreviewSlides]);
+
+  // Layout change handlers enforcing slots.length === productsPerSlide
   const changeCount = (next: 2 | 3) => {
     setCount(next);
-    setLayout(next === 2 ? DEFAULT_LAYOUT.map(s => ({ img: [...s.img], text: [...s.text] })) : THREE_LAYOUT.map(s => ({ img: [...s.img], text: [...s.text] })));
+    setLayout(prev => adjustLayoutSlots(prev, next));
   };
   const resetLayout = () => {
-    changeCount(count);
+    setLayout(adjustLayoutSlots([], count));
     setRatio("16:9");
     setAutoCenter(true);
   };
@@ -689,15 +718,22 @@ export default function ExcelToPptTool() {
       });
 
       const defaultFilename = file.name.replace(/\.xlsx?$/i, "") + (templateFile ? "_catalogue_custom.pptx" : "_catalogue.pptx");
-      const delivery = await deliverPresentation(output.blob, defaultFilename, false);
+      const delivery = await deliverPresentation(output.blob, defaultFilename, false, {
+        slideCount: output.slideCount,
+        hasImages: output.totalProducts > 0
+      });
+
+      if (!delivery.success) {
+        throw new Error(delivery.error || "Pre-download structural validation failed.");
+      }
 
       setLastResult({ output, delivery, filename: defaultFilename });
       setProgress(null);
-      setStatus(`Presentation generated successfully: ${output.slideCount} slides (${output.totalProducts} products). Validated OOXML compliant.`);
+      setStatus(`Presentation generated successfully: ${output.slideCount} slides (${output.totalProducts} products). Structural OpenXML packaging validated.`);
     } catch (error: any) {
       console.error("PPT Generation error:", error);
       setProgress(null);
-      setStatus(`Presentation generation failed: ${error.message || String(error)}`);
+      setStatus(`Presentation generation blocked: ${error.message || String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -706,7 +742,20 @@ export default function ExcelToPptTool() {
   const handleDownloadAgain = async () => {
     if (!lastResult) return;
     try {
-      await deliverPresentation(lastResult.output.blob, lastResult.filename, isDesktop());
+      const delivery = await deliverPresentation(
+        lastResult.output.blob,
+        lastResult.filename,
+        isDesktop(),
+        {
+          slideCount: lastResult.output.slideCount,
+          hasImages: lastResult.output.totalProducts > 0
+        }
+      );
+      if (!delivery.success) {
+        setStatus(`Save/Download blocked: ${delivery.error || "Pre-download validation failed."}`);
+      } else {
+        setStatus(delivery.savedPath ? `Saved to: ${delivery.savedPath}` : "Presentation downloaded successfully.");
+      }
     } catch (err: any) {
       setStatus(`Download failed: ${err.message || String(err)}`);
     }
@@ -952,10 +1001,17 @@ export default function ExcelToPptTool() {
                         const idx = Number(e.target.value);
                         setSelectedSlideIndex(idx);
                         const sl = templateInfo.slides[idx];
-                        if (sl && sl.slots && sl.slots.length > 0) {
-                          setLayout(sl.slots.map(s => ({ img: [...s.img_rect], text: [...s.text_rect] })));
-                          if (sl.slots_count === 2 || sl.slots_count === 3) {
-                            setCount(sl.slots_count as 2 | 3);
+                        if (sl) {
+                          const targetCount: ProductsPerSlide = sl.slots_count === 2 ? 2 : 3;
+                          setCount(targetCount);
+                          if (sl.slots && sl.slots.length > 0) {
+                            const rawSlots: Slot[] = sl.slots.map(s => ({
+                              img: [s.img_rect[0], s.img_rect[1], s.img_rect[2], s.img_rect[3]] as [number, number, number, number],
+                              text: [s.text_rect[0], s.text_rect[1], s.text_rect[2], s.text_rect[3]] as [number, number, number, number]
+                            }));
+                            setLayout(adjustLayoutSlots(rawSlots, targetCount));
+                          } else {
+                            setLayout(adjustLayoutSlots([], targetCount));
                           }
                         }
                       }}
@@ -1678,8 +1734,8 @@ export default function ExcelToPptTool() {
               </>
             )}
 
-            <div className={`ep-preview-slots-grid slots-${productsPerSlide}`}>
-              {Array.from({ length: productsPerSlide }).map((_, slotIdx) => {
+            <div className={`ep-preview-slots-grid slots-${count}`}>
+              {Array.from({ length: count }).map((_, slotIdx) => {
                 const prod = currentSlideProducts[slotIdx];
                 if (!prod) {
                   return (
@@ -1858,25 +1914,46 @@ export default function ExcelToPptTool() {
             {showDiagnostics && (
               <div className="ep-diagnostics-body">
                 <div className="ep-diag-check-item ok">
-                  ✓ Core Parts [Content_Types].xml & rels verified present
+                  ✓ Check 1: Non-empty buffer ({lastResult.output.byteSize.toLocaleString()} bytes)
                 </div>
                 <div className="ep-diag-check-item ok">
-                  ✓ ST_SlideId ECMA-376 bounds confirmed (256 &le; id &lt; 2147483648)
+                  ✓ Check 2: ZIP integrity & magic bytes PK\x03\x04 verified
                 </div>
                 <div className="ep-diag-check-item ok">
-                  ✓ {lastResult.output.validation.mediaCount} media assets registered in [Content_Types].xml
+                  ✓ Check 3: No duplicate ZIP entries & all mandatory OpenXML parts present
                 </div>
                 <div className="ep-diag-check-item ok">
-                  ✓ Slide relationships and layout references validated
+                  ✓ Check 4: All XML and .rels parts parsed and well-formed
                 </div>
                 <div className="ep-diag-check-item ok">
-                  ✓ All XML parts validated well-formed with matching closing tags
+                  ✓ Check 5: Content types declared for every part in [Content_Types].xml
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 6: Relationship targets exist and rIds unique per .rels
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 7: Shape IDs unique per slide
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 8: sldIdLst matches presentation.xml.rels and ECMA-376 bounds
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 9: Independent parser re-read pass verified
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 10: Slide count matches expected ({lastResult.output.slideCount}) & {lastResult.output.validation.mediaCount} media assets linked
+                </div>
+                <div className="ep-diag-check-item ok">
+                  ✓ Check 11: SHA-256 integrity verified ({lastResult.delivery.sha256 || lastResult.output.validation.sha256})
                 </div>
                 {lastResult.delivery.savedPath && (
                   <div style={{ marginTop: "6px", color: "#60a5fa" }}>
                     Destination: {lastResult.delivery.savedPath}
                   </div>
                 )}
+                <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--muted-foreground, #94a3b8)", fontStyle: "italic" }}>
+                  * Structural and OpenXML packaging validation only; does not guarantee Microsoft PowerPoint application compatibility.
+                </div>
               </div>
             )}
           </div>
@@ -1889,7 +1966,7 @@ export default function ExcelToPptTool() {
           <strong>Ready to Generate</strong>
           <span>
             {file
-              ? `Processing ${sampleRows.length || "all"} product items using ${useCustomTemplate && templateFile ? `template "${templateFile.name}"` : "built-in layout"}.`
+              ? `Processing ${sampleRows.length || "all"} product items (${count} per slide, ${slideCounts.productSlides} slide${slideCounts.productSlides === 1 ? "" : "s"}) using ${useCustomTemplate && templateFile ? `template "${templateFile.name}"` : "built-in layout"}.`
               : "Upload an Excel workbook to begin."}
           </span>
         </div>

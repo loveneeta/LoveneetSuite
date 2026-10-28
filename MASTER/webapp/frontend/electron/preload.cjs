@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     openPath: (folderPath) => ipcRenderer.invoke("fs:openPath", folderPath),
     exists: (targetPath) => ipcRenderer.invoke("fs:exists", targetPath),
     writeFile: (targetPath, bufferBase64) => ipcRenderer.invoke("fs:writeFile", { targetPath, bufferBase64 }),
+    readFile: (targetPath) => ipcRenderer.invoke("fs:readFile", targetPath),
     showItemInFolder: (fullPath) => ipcRenderer.invoke("fs:showItemInFolder", fullPath)
   },
 

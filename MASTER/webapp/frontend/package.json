@@ -61,6 +61,7 @@
     }
   },
   "dependencies": {
+    "@xmldom/xmldom": "^0.9.12",
     "electron-updater": "^6.8.11",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",

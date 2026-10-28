@@ -6,6 +6,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const { autoUpdater } = require("electron-updater");
 const LocalDatabase = require("./database.cjs");
 
@@ -206,7 +207,21 @@ function setupIpcHandlers() {
       await fs.promises.writeFile(tmpPath, buf);
       await fs.promises.rename(tmpPath, targetPath);
       const stat = await fs.promises.stat(targetPath);
-      return { success: true, size: stat.size, path: targetPath };
+      const writtenBuf = await fs.promises.readFile(targetPath);
+      const sha256 = crypto.createHash("sha256").update(writtenBuf).digest("hex");
+      return { success: true, size: stat.size, path: targetPath, sha256 };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle("fs:readFile", async (event, targetPath) => {
+    if (!targetPath) return { success: false, error: "Empty path" };
+    try {
+      if (!fs.existsSync(targetPath)) return { success: false, error: "File not found" };
+      const buf = await fs.promises.readFile(targetPath);
+      const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+      return { success: true, size: buf.length, sha256, dataBase64: buf.toString("base64") };
     } catch (e) {
       return { success: false, error: e.message };
     }

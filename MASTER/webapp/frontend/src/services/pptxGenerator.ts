@@ -6,12 +6,11 @@
 
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { validatePptxPackage, PptxValidationResult } from "./pptxValidator";
+import { validatePptxPackage, type PptxValidationResult } from "./pptxValidator.ts";
+import { type Slot, chunkProducts, calculateSlideCount } from "./layoutConfig.ts";
+import { parseXmlDocument, serializeXmlDocument } from "./xmlHelper.ts";
 
-export interface Slot {
-  img: number[]; // [left, top, right, bottom] in 800x450 scale
-  text: number[]; // [left, top, right, bottom] in 800x450 scale
-}
+export type { Slot };
 
 export interface Mapping {
   code: string;
@@ -99,8 +98,20 @@ export async function generateCataloguePptx(
 
   onProgress?.("parsing", 10, "Parsing Excel workbook & extracting product records…");
 
-  // 1. Parse Excel Workbook
-  const excelBuf = excelFileOrBuf instanceof ArrayBuffer ? excelFileOrBuf : await excelFileOrBuf.arrayBuffer();
+  // 1. Parse Excel Workbook (Browser File/Blob or Node Buffer/Uint8Array/ArrayBuffer)
+  let excelBuf: ArrayBuffer;
+  if (excelFileOrBuf instanceof ArrayBuffer) {
+    excelBuf = excelFileOrBuf;
+  } else if (ArrayBuffer.isView(excelFileOrBuf)) {
+    excelBuf = excelFileOrBuf.buffer.slice(
+      excelFileOrBuf.byteOffset,
+      excelFileOrBuf.byteOffset + excelFileOrBuf.byteLength
+    ) as ArrayBuffer;
+  } else if (typeof (excelFileOrBuf as any)?.arrayBuffer === "function") {
+    excelBuf = await (excelFileOrBuf as any).arrayBuffer();
+  } else {
+    throw new Error("Invalid Excel input: expected File, Blob, Buffer, or ArrayBuffer.");
+  }
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(excelBuf);
   const ws = wb.worksheets[0];
@@ -119,7 +130,7 @@ export async function generateCataloguePptx(
           rowNum = img.range.tl.row;
         }
       }
-      const media = wb.model?.media?.[img.imageId] || (wb.model?.media || []).find(
+      const media = (wb.model?.media as any)?.[img.imageId] || (wb.model?.media || []).find(
         (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
       );
       if (media && media.buffer && rowNum > 0) {
@@ -270,15 +281,23 @@ export async function generateCataloguePptx(
   const slide1XmlBase = await zip.file(baseSlideFile)?.async("text");
   const slide1RelsBase = (await zip.file(baseRelsFile)?.async("text")) ||
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
-  let presXmlStr = await zip.file("ppt/presentation.xml")?.async("text");
-  let presRelsStr = await zip.file("ppt/_rels/presentation.xml.rels")?.async("text");
-  let contentTypesStr = await zip.file("[Content_Types].xml")?.async("text");
+  const presXmlStr = await zip.file("ppt/presentation.xml")?.async("text");
+  const presRelsStr = await zip.file("ppt/_rels/presentation.xml.rels")?.async("text");
+  const contentTypesStr = await zip.file("[Content_Types].xml")?.async("text");
 
   if (!slide1XmlBase || !presXmlStr || !presRelsStr || !contentTypesStr) {
     throw new Error("The PowerPoint template is missing essential files (presentation.xml, rels, or content types).");
   }
 
-  // Ensure all common media extension defaults are declared in [Content_Types].xml
+  // Parse Content_Types, presentation.xml, presentation.xml.rels using robust W3C DOM
+  const ctDoc = parseXmlDocument(contentTypesStr);
+  const ctRoot = ctDoc.documentElement;
+
+  const presDoc = parseXmlDocument(presXmlStr);
+  const presRelsDoc = parseXmlDocument(presRelsStr);
+  const presRelsRoot = presRelsDoc.documentElement;
+
+  // Ensure all common media extension defaults are declared in [Content_Types].xml via DOM
   const mediaDefaults = [
     { ext: "jpeg", type: "image/jpeg" },
     { ext: "jpg", type: "image/jpeg" },
@@ -287,16 +306,31 @@ export async function generateCataloguePptx(
     { ext: "gif", type: "image/gif" }
   ];
 
+  const existingDefaultExts = new Set<string>();
+  const defaultNodes = ctDoc.getElementsByTagName("Default");
+  for (let i = 0; i < defaultNodes.length; i++) {
+    const ext = defaultNodes[i].getAttribute("Extension");
+    if (ext) existingDefaultExts.add(ext.toLowerCase());
+  }
+
   for (const { ext, type } of mediaDefaults) {
-    if (!contentTypesStr.includes(`Extension="${ext}"`) && !contentTypesStr.includes(`Extension="${ext.toUpperCase()}"`)) {
-      contentTypesStr = contentTypesStr.replace(
-        "<Types ",
-        `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="${ext}" ContentType="${type}"/>`
-      ).replace(
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    if (!existingDefaultExts.has(ext.toLowerCase())) {
+      const defElem = ctDoc.createElementNS(
+        "http://schemas.openxmlformats.org/package/2006/content-types",
+        "Default"
       );
+      defElem.setAttribute("Extension", ext);
+      defElem.setAttribute("ContentType", type);
+      ctRoot.appendChild(defElem);
+      existingDefaultExts.add(ext.toLowerCase());
     }
+  }
+
+  const existingOverrides = new Set<string>();
+  const overrideNodes = ctDoc.getElementsByTagName("Override");
+  for (let i = 0; i < overrideNodes.length; i++) {
+    const part = overrideNodes[i].getAttribute("PartName");
+    if (part) existingOverrides.add(part.toLowerCase());
   }
 
   // Slide dimensions
@@ -326,17 +360,37 @@ export async function generateCataloguePptx(
   }
   slotShapes.sort((a, b) => a.offX - b.offX);
   const slotsCount = customLayout && customLayout.length > 0 ? customLayout.length : (slotShapes.length || 3);
-  const totalSlides = Math.ceil(products.length / slotsCount);
+  const productChunks = chunkProducts(products, slotsCount);
+  const slideCounts = calculateSlideCount(products.length, slotsCount, 0);
+  const totalSlides = slideCounts.productSlides;
 
-  // STRICT ECMA-376 ST_SlideId compliance:
-  // Must only match <p:sldId\b[^>]*\bid="(\d+)" and filter to [256, 2147483647]
-  const existingSldIds = [...presXmlStr.matchAll(/<p:sldId\b[^>]*\bid="(\d+)"/g)]
-    .map(x => parseInt(x[1], 10))
-    .filter(val => val >= 256 && val < 2147483648);
+  if (totalSlides === 0) {
+    throw new Error("No products found in Excel workbook to generate presentation.");
+  }
+
+  // STRICT ECMA-376 ST_SlideId compliance via DOM
+  const sldIdLst = presDoc.getElementsByTagName("p:sldIdLst")[0] || presDoc.getElementsByTagName("sldIdLst")[0];
+  const existingSldNodes = presDoc.getElementsByTagName("p:sldId");
+  const existingSldIds: number[] = [];
+  for (let i = 0; i < existingSldNodes.length; i++) {
+    const idVal = parseInt(existingSldNodes[i].getAttribute("id") || "0", 10);
+    if (idVal >= 256 && idVal < 2147483648) {
+      existingSldIds.push(idVal);
+    }
+  }
   let nextSldId = existingSldIds.length > 0 ? Math.max(...existingSldIds) + 1 : 256;
 
-  // Strict relationship ID calculation for presentation.xml.rels
-  const presRIdMatches = [...presRelsStr.matchAll(/Id="rId(\d+)"/g)].map(x => parseInt(x[1], 10));
+  // Strict relationship ID calculation for presentation.xml.rels via DOM
+  const presRelNodes = presRelsDoc.getElementsByTagName("Relationship");
+  const presRIdMatches: number[] = [];
+  const existingPresTargets = new Set<string>();
+  for (let i = 0; i < presRelNodes.length; i++) {
+    const rId = presRelNodes[i].getAttribute("Id") || "";
+    const match = rId.match(/^rId(\d+)$/);
+    if (match) presRIdMatches.push(parseInt(match[1], 10));
+    const target = presRelNodes[i].getAttribute("Target");
+    if (target) existingPresTargets.add(target.toLowerCase());
+  }
   let nextPresRId = Math.max(...presRIdMatches, 0) + 1;
 
   onProgress?.("media", 40, `Generating ${totalSlides} slides and processing product images…`);
@@ -345,7 +399,9 @@ export async function generateCataloguePptx(
     const slideName = `slide${sIdx}.xml`;
     const relsName = `slide${sIdx}.xml.rels`;
     let slideXml = slide1XmlBase;
-    let slideRels = slide1RelsBase;
+    const sRelsDoc = parseXmlDocument(slide1RelsBase);
+    const sRelsRoot = sRelsDoc.documentElement;
+    const slideProducts = productChunks[sIdx - 1] || [];
 
     // Header customization
     if (headerText) {
@@ -369,12 +425,27 @@ export async function generateCataloguePptx(
       }
     }
 
-    let nextSlideRId = Math.max(...[...slideRels.matchAll(/Id="rId(\d+)"/g)].map(x => parseInt(x[1], 10)), 0) + 1;
+    // If template has more slot shapes than requested slotsCount, clear extra shapes
+    for (let extraIdx = slotsCount; extraIdx < slotShapes.length; extraIdx++) {
+      const extraSlot = slotShapes[extraIdx];
+      const emptyTxBody = `<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>`;
+      slideXml = slideXml.replace(extraSlot.rawXml, () => emptyTxBody);
+    }
+
+    // Calculate next relationship ID for slide
+    const existingSlideRelIds: number[] = [];
+    const sRelNodes = sRelsDoc.getElementsByTagName("Relationship");
+    for (let i = 0; i < sRelNodes.length; i++) {
+      const rId = sRelNodes[i].getAttribute("Id") || "";
+      const match = rId.match(/^rId(\d+)$/);
+      if (match) existingSlideRelIds.push(parseInt(match[1], 10));
+    }
+    let nextSlideRId = Math.max(...existingSlideRelIds, 0) + 1;
     let picsXml = "";
 
     for (let slotIdx = 0; slotIdx < slotsCount; slotIdx++) {
       const prodIdx = (sIdx - 1) * slotsCount + slotIdx;
-      const prod = products[prodIdx];
+      const prod = slideProducts[slotIdx];
       const slot = slotShapes[slotIdx];
       const userSlot = customLayout && customLayout[slotIdx];
 
@@ -439,8 +510,14 @@ export async function generateCataloguePptx(
           zip.file(`ppt/media/${imgFilename}`, imgBuffer);
 
           const imgRelId = `rId${nextSlideRId++}`;
-          const relEntry = `<Relationship Id="${imgRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imgFilename}"/>`;
-          slideRels = slideRels.replace("</Relationships>", `${relEntry}</Relationships>`);
+          const relElem = sRelsDoc.createElementNS(
+            "http://schemas.openxmlformats.org/package/2006/relationships",
+            "Relationship"
+          );
+          relElem.setAttribute("Id", imgRelId);
+          relElem.setAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image");
+          relElem.setAttribute("Target", `../media/${imgFilename}`);
+          sRelsRoot.appendChild(relElem);
 
           let picX = slot ? slot.offX : Math.round((slotIdx * 260 / 800) * cx);
           let picY = slot ? Math.max(700000, slot.offY - 4400000) : Math.round((80 / 450) * cy);
@@ -476,30 +553,51 @@ export async function generateCataloguePptx(
     }
 
     zip.file(`ppt/slides/${slideName}`, slideXml);
-    zip.file(`ppt/slides/_rels/${relsName}`, slideRels);
+    zip.file(`ppt/slides/_rels/${relsName}`, serializeXmlDocument(sRelsDoc));
 
     if (sIdx > 1) {
       const partName = `/ppt/slides/${slideName}`;
-      if (!contentTypesStr.includes(`PartName="${partName}"`)) {
-        const ctEntry = `<Override PartName="${partName}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`;
-        contentTypesStr = contentTypesStr.replace("</Types>", `${ctEntry}</Types>`);
+      if (!existingOverrides.has(partName.toLowerCase())) {
+        const overElem = ctDoc.createElementNS(
+          "http://schemas.openxmlformats.org/package/2006/content-types",
+          "Override"
+        );
+        overElem.setAttribute("PartName", partName);
+        overElem.setAttribute("ContentType", "application/vnd.openxmlformats-officedocument.presentationml.slide+xml");
+        ctRoot.appendChild(overElem);
+        existingOverrides.add(partName.toLowerCase());
       }
 
       const presRelId = `rId${nextPresRId++}`;
-      if (!presRelsStr.includes(`Target="slides/${slideName}"`)) {
-        const presRelEntry = `<Relationship Id="${presRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/${slideName}"/>`;
-        presRelsStr = presRelsStr.replace("</Relationships>", `${presRelEntry}</Relationships>`);
+      const targetRel = `slides/${slideName}`;
+      if (!existingPresTargets.has(targetRel.toLowerCase())) {
+        const relElem = presRelsDoc.createElementNS(
+          "http://schemas.openxmlformats.org/package/2006/relationships",
+          "Relationship"
+        );
+        relElem.setAttribute("Id", presRelId);
+        relElem.setAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide");
+        relElem.setAttribute("Target", targetRel);
+        presRelsRoot.appendChild(relElem);
+        existingPresTargets.add(targetRel.toLowerCase());
       }
 
-      const sldIdVal = nextSldId++;
-      const sldEntry = `<p:sldId id="${sldIdVal}" r:id="${presRelId}"/>`;
-      presXmlStr = presXmlStr.replace("</p:sldIdLst>", `${sldEntry}</p:sldIdLst>`);
+      if (sldIdLst) {
+        const sldIdVal = nextSldId++;
+        const sldElem = presDoc.createElementNS(
+          "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "p:sldId"
+        );
+        sldElem.setAttribute("id", String(sldIdVal));
+        sldElem.setAttribute("r:id", presRelId);
+        sldIdLst.appendChild(sldElem);
+      }
     }
   }
 
-  zip.file("[Content_Types].xml", contentTypesStr);
-  zip.file("ppt/_rels/presentation.xml.rels", presRelsStr);
-  zip.file("ppt/presentation.xml", presXmlStr);
+  zip.file("[Content_Types].xml", serializeXmlDocument(ctDoc));
+  zip.file("ppt/_rels/presentation.xml.rels", serializeXmlDocument(presRelsDoc));
+  zip.file("ppt/presentation.xml", serializeXmlDocument(presDoc));
 
   onProgress?.("validating", 85, "Serializing package & validating OpenXML integrity…");
 
@@ -510,8 +608,11 @@ export async function generateCataloguePptx(
     compressionOptions: { level: 6 }
   });
 
-  // Pre-Delivery Structural Integrity Validation
-  const validation = await validatePptxPackage(blob);
+  // Pre-Delivery Structural Integrity Validation (Checks 1-10)
+  const validation = await validatePptxPackage(blob, {
+    slideCount: totalSlides,
+    hasImages: products.some(p => Boolean(p.image || p.imageLink))
+  });
 
   if (!validation.valid) {
     const errorDetails = validation.errors.join("; ");
