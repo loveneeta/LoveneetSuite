@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { DEFAULT_PPT_TEMPLATE_B64 } from "./defaultPptTemplate";
+import { SAMPLE_PRODUCTS } from "./sampleTemplateData";
 import {
   FileSpreadsheet,
   Presentation,
@@ -271,11 +272,18 @@ async function generateCustomPptClient(
   try {
     const images = ws.getImages ? ws.getImages() : [];
     for (const img of images) {
-      const rowNum = (img.range?.tl?.nativeRow ?? 0) + 1;
-      const media = (wb.model?.media || []).find(
+      let rowNum = 0;
+      if (img.range && img.range.tl) {
+        if (typeof img.range.tl.nativeRow === "number") {
+          rowNum = img.range.tl.nativeRow + 1;
+        } else if (typeof img.range.tl.row === "number") {
+          rowNum = img.range.tl.row;
+        }
+      }
+      const media = wb.model?.media?.[img.imageId] || (wb.model?.media || []).find(
         (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
       );
-      if (media && media.buffer) {
+      if (media && media.buffer && rowNum > 0) {
         imgByRow.set(rowNum, media);
       }
     }
@@ -320,14 +328,15 @@ async function generateCustomPptClient(
     return null;
   };
 
-  const codeCol = getCol("code", "buyer code", "sku", "item code", "product code", "code");
-  const descCol = getCol("description", "description", "product name", "product", "item name", "desc");
+  const codeCol = getCol("code", "buyer code", "buyer code / sku", "sku", "item code", "product code", "code");
+  const descCol = getCol("description", "product description", "description", "product name", "product", "item name", "desc");
   const dimCmCol = getCol("dim_cm", "product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)");
   const dimInCol = getCol("dim_in", "carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)");
-  const priceCol = getCol("price", "price", "mrp", "rate", "cost");
+  const priceCol = getCol("price", "price (usd)", "price", "mrp", "rate", "cost");
   const lCol = getCol("length", "length", " l");
   const wCol = getCol("width", "width", "breadth", " w");
   const hCol = getCol("height", "height", " h");
+  const imageCol = getCol("image", "product image (embedded)", "product image", "image", "photo", "picture", "img");
 
   if (!codeCol) {
     throw new Error("Select the product code / SKU column.");
@@ -340,6 +349,7 @@ async function generateCustomPptClient(
     dim_in: string;
     price: string;
     image?: any;
+    imageLink?: string;
   }> = [];
 
   const startRow = ws.rowCount >= 3 && !ws.getRow(2).getCell(codeCol).value ? 3 : 2;
@@ -376,13 +386,26 @@ async function generateCustomPptClient(
 
         const priceVal = priceCol ? String(row.getCell(priceCol).value || "").trim() : "";
 
+        // Check embedded image first, then check cell link
+        const embeddedImg = imgByRow.get(rIdx);
+        let linkVal = "";
+        if (!embeddedImg && imageCol) {
+          const rawImgCell = row.getCell(imageCol).value;
+          if (typeof rawImgCell === "string") {
+            linkVal = rawImgCell.trim();
+          } else if (rawImgCell && typeof rawImgCell === "object") {
+            linkVal = String((rawImgCell as any).hyperlink || (rawImgCell as any).text || "").trim();
+          }
+        }
+
         products.push({
           code,
           description: desc,
           dim_cm: d_cm,
           dim_in: d_in,
           price: priceVal,
-          image: imgByRow.get(rIdx)
+          image: embeddedImg,
+          imageLink: linkVal
         });
       }
     }
@@ -478,10 +501,40 @@ async function generateCustomPptClient(
         const updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);
         slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
 
+        let imgBuffer: ArrayBuffer | null = null;
+        let imgExt = "png";
+
         if (prod.image && prod.image.buffer) {
-          const imgExt = prod.image.extension || "png";
+          imgBuffer = prod.image.buffer;
+          imgExt = prod.image.extension || "png";
+        } else if (prod.imageLink) {
+          if (prod.imageLink.startsWith("data:image/")) {
+            try {
+              const matches = prod.imageLink.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+              if (matches) {
+                imgExt = matches[1] === "jpeg" ? "jpg" : matches[1];
+                imgBuffer = base64ToArrayBuffer(matches[2]);
+              }
+            } catch (e) {
+              console.warn("Could not decode data URI image:", e);
+            }
+          } else if (prod.imageLink.startsWith("http://") || prod.imageLink.startsWith("https://")) {
+            try {
+              const res = await fetch(prod.imageLink);
+              if (res.ok) {
+                imgBuffer = await res.arrayBuffer();
+                if (prod.imageLink.includes(".jpg") || prod.imageLink.includes(".jpeg")) imgExt = "jpg";
+                else if (prod.imageLink.includes(".webp")) imgExt = "webp";
+              }
+            } catch (e) {
+              console.warn("Could not fetch remote image link:", e);
+            }
+          }
+        }
+
+        if (imgBuffer) {
           const imgFilename = `prod_img_${sIdx}_${slotIdx}.${imgExt}`;
-          zip.file(`ppt/media/${imgFilename}`, prod.image.buffer);
+          zip.file(`ppt/media/${imgFilename}`, imgBuffer);
 
           const imgRelId = `rId${nextSlideRId++}`;
           const relEntry = `<Relationship Id="${imgRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imgFilename}"/>`;
@@ -646,6 +699,31 @@ export default function ExcelToPptTool() {
         return;
       }
 
+      // Extract cell-anchored image thumbnails for live preview
+      const imgThumbnails: Record<number, string> = {};
+      try {
+        const images = sheet.getImages ? sheet.getImages() : [];
+        for (const img of images) {
+          let rowNum = 0;
+          if (img.range && img.range.tl) {
+            if (typeof img.range.tl.nativeRow === "number") {
+              rowNum = img.range.tl.nativeRow + 1;
+            } else if (typeof img.range.tl.row === "number") {
+              rowNum = img.range.tl.row;
+            }
+          }
+          const media = workbook.model?.media?.[img.imageId] || (workbook.model?.media || []).find(
+            (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
+          );
+          if (media && media.buffer && rowNum > 0) {
+            const blob = new Blob([media.buffer], { type: `image/${media.extension || "jpeg"}` });
+            imgThumbnails[rowNum] = URL.createObjectURL(blob);
+          }
+        }
+      } catch (e) {
+        console.warn("Could not load preview thumbnails:", e);
+      }
+
       // Collect headers from row 1 and row 2 (supports multi-row headers)
       const r1 = (sheet.getRow(1).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
       let colNames = [...r1];
@@ -679,6 +757,7 @@ export default function ExcelToPptTool() {
             }
           });
           if (Object.values(rowObj).some(Boolean)) {
+            rowObj["__thumbnail"] = imgThumbnails[rowNumber] || "";
             dataRows.push(rowObj);
           }
         }
@@ -690,20 +769,121 @@ export default function ExcelToPptTool() {
         colNames.find(h => needles.some(n => h.toLowerCase() === n.toLowerCase() || h.toLowerCase().includes(n.toLowerCase()))) ?? "";
 
       const autoMapped: Mapping = {
-        code: findCol("buyer code", "sku", "item code", "product code", "code"),
-        description: findCol("description", "product name", "product", "item name", "desc"),
+        code: findCol("buyer code", "buyer code / sku", "sku", "item code", "product code", "code"),
+        description: findCol("product description", "description", "product name", "product", "item name", "desc"),
         dim_cm: findCol("product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)"),
         dim_in: findCol("carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)"),
-        price: findCol("price", "mrp", "rate", "cost", "qyt"),
+        price: findCol("price (usd)", "price", "mrp", "rate", "cost", "qyt"),
         length: findCol("length", " l", "len"),
         width: findCol("width", "breadth", " w", "wid"),
         height: findCol("height", " h", "hgt"),
-        image: findCol("image", "photo", "picture", "img", "product image")
+        image: findCol("product image (embedded)", "product image", "image", "photo", "picture", "img")
       };
       setMapping(autoMapped);
-      setStatus(`Loaded ${colNames.length} columns and ${dataRows.length} product rows from Excel.`);
+      const embeddedCount = Object.keys(imgThumbnails).length;
+      setStatus(`Loaded ${colNames.length} columns and ${dataRows.length} product rows from Excel (${embeddedCount} embedded photos detected).`);
     } catch {
       setStatus("Could not read this workbook. Please upload a valid .xlsx file.");
+    }
+  };
+
+  // Download Sample Excel Template with Embedded Photos
+  const downloadExcelTemplate = async () => {
+    try {
+      setStatus("Generating sample Excel workbook with embedded product images…");
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Loveneet Suite";
+      wb.lastModifiedBy = "Loveneet Suite";
+      wb.created = new Date();
+
+      const ws = wb.addWorksheet("Products", {
+        views: [{ showGridLines: true }]
+      });
+
+      ws.columns = [
+        { header: "Buyer Code / SKU", key: "code", width: 22 },
+        { header: "Product Description", key: "desc", width: 40 },
+        { header: "Product Dimension (CM)", key: "dim_cm", width: 26 },
+        { header: "Carton Dimension (Inch)", key: "dim_in", width: 26 },
+        { header: "Price (USD)", key: "price", width: 16 },
+        { header: "Product Image (Embedded)", key: "image", width: 28 },
+      ];
+
+      const headerRow = ws.getRow(1);
+      headerRow.height = 32;
+      headerRow.eachCell((cell) => {
+        cell.font = { name: "Calibri", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E293B" } };
+        cell.alignment = { vertical: "middle", horizontal: "center" };
+      });
+
+      const sampleItems = [
+        {
+          code: "11185",
+          desc: "Marble Accent Table - Natural White Finish",
+          dim_cm: "25.4 x 25.4 x 47 CM",
+          dim_in: "13 x 13 x 22 IN",
+          price: "$45.00"
+        },
+        {
+          code: "11167",
+          desc: "Travertine Coffee Table - Honed Finish",
+          dim_cm: "41.3 x 41.3 x 45 CM",
+          dim_in: "18 x 18 x 20 IN",
+          price: "$65.00"
+        },
+        {
+          code: "12262",
+          desc: "Iron Marble Bistro Table - Black Frame",
+          dim_cm: "64 x 64 x 76 CM",
+          dim_in: "27 x 27 x 32 IN",
+          price: "$85.00"
+        }
+      ];
+
+      sampleItems.forEach((item, idx) => {
+        const rowIdx = idx + 2;
+        const row = ws.addRow(item);
+        row.height = 85;
+
+        row.eachCell((cell, colNum) => {
+          cell.alignment = { vertical: "middle", horizontal: colNum === 1 || colNum >= 3 ? "center" : "left" };
+          cell.font = { name: "Calibri", size: 10 };
+          if (idx % 2 === 1) {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+          }
+        });
+
+        if (SAMPLE_PRODUCTS[idx]) {
+          const imgId = wb.addImage({
+            base64: SAMPLE_PRODUCTS[idx].base64,
+            extension: SAMPLE_PRODUCTS[idx].extension as "jpeg" | "png"
+          });
+
+          ws.addImage(imgId, {
+            tl: { col: 5.15, row: rowIdx - 1 + 0.08 },
+            ext: { width: 140, height: 100 },
+            editAs: "oneCell"
+          });
+        }
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "Loveneet_Product_Catalogue_Sample_Template.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      setStatus("Downloaded sample Excel template with 3 embedded product images.");
+    } catch (err: any) {
+      console.error("Error generating Excel template:", err);
+      setStatus("Could not generate Excel template: " + (err.message || String(err)));
     }
   };
 
@@ -862,6 +1042,47 @@ export default function ExcelToPptTool() {
           <strong>{file ? file.name : "Click or drag an Excel workbook (.xlsx)"}</strong>
           <small>{file ? `${(file.size / 1024).toFixed(0)} KB · Ready to map` : "Supports multi-row headers and embedded cell photos"}</small>
         </label>
+
+        <div className="ep-template-download-banner" style={{
+          marginTop: "1rem",
+          padding: "0.85rem 1.15rem",
+          background: "linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)",
+          border: "1px solid #e2e8f0",
+          borderRadius: "8px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "0.75rem"
+        }}>
+          <div>
+            <strong style={{ fontSize: "0.88rem", color: "#0f172a", display: "block" }}>
+              Need a sample Excel template with embedded product images?
+            </strong>
+            <span style={{ fontSize: "0.80rem", color: "#64748b" }}>
+              Download our ready-to-use template pre-filled with clean columns, sample items, and real cell-embedded photos.
+            </span>
+          </div>
+          <button
+            type="button"
+            className="ep-btn ep-btn-secondary"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "7px 14px",
+              fontSize: "0.84rem",
+              fontWeight: 600,
+              backgroundColor: "#ffffff",
+              border: "1px solid #cbd5e1",
+              boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+              cursor: "pointer"
+            }}
+            onClick={downloadExcelTemplate}
+          >
+            <Download size={15} /> Download Sample Excel Template (.xlsx)
+          </button>
+        </div>
       </section>
 
       {/* Step 2: PowerPoint Template Selection */}
@@ -1390,11 +1611,24 @@ export default function ExcelToPptTool() {
                 return (
                   <div key={slotIdx} className="ep-preview-slot-card">
                     <div className="ep-slot-image-box">
-                      <div className="ep-slot-image-placeholder">
-                        <ImageIcon size={32} />
-                        <span>Product Photo</span>
-                        <small>{imageFit === "contain" ? "Shrink & Fit" : "Crop & Fit"}</small>
-                      </div>
+                      {prod.__thumbnail ? (
+                        <img
+                          src={prod.__thumbnail}
+                          alt={skuVal}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: imageFit,
+                            borderRadius: "4px"
+                          }}
+                        />
+                      ) : (
+                        <div className="ep-slot-image-placeholder">
+                          <ImageIcon size={32} />
+                          <span>Product Photo</span>
+                          <small>{imageFit === "contain" ? "Shrink & Fit" : "Crop & Fit"}</small>
+                        </div>
+                      )}
                     </div>
 
                     <div className="ep-slot-info-box">
