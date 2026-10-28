@@ -1604,8 +1604,18 @@ export default function ExcelToPptTool() {
 
                 const skuVal = prod[mapping.code] || "SKU-00000";
                 const descVal = prod[mapping.description] || "Product Description";
-                const cmVal = prod[mapping.dim_cm] || (prod[mapping.length] && prod[mapping.width] && prod[mapping.height] ? `${prod[mapping.length]} x ${prod[mapping.width]} x ${prod[mapping.height]} CM` : "00.00 x 00.00 x 00.00 CM");
-                const inVal = prod[mapping.dim_in] || "00.00 x 00.00 x 00.00 IN";
+                const cmVal = prod[mapping.dim_cm] || (prod[mapping.length] && prod[mapping.width] && prod[mapping.height] ? `${prod[mapping.length]} x ${prod[mapping.width]} x ${prod[mapping.height]} CM` : "");
+                let inVal = prod[mapping.dim_in] || "";
+                if (!inVal && prod[mapping.length] && prod[mapping.width] && prod[mapping.height]) {
+                  try {
+                    const lIn = (parseFloat(prod[mapping.length]) / 2.54).toFixed(1);
+                    const wIn = (parseFloat(prod[mapping.width]) / 2.54).toFixed(1);
+                    const hIn = (parseFloat(prod[mapping.height]) / 2.54).toFixed(1);
+                    if (!isNaN(parseFloat(lIn)) && !isNaN(parseFloat(wIn)) && !isNaN(parseFloat(hIn))) {
+                      inVal = `${lIn} x ${wIn} x ${hIn} IN`;
+                    }
+                  } catch {}
+                }
                 const priceVal = prod[mapping.price] ? `PRICE : ${prod[mapping.price]}` : "";
 
                 return (
@@ -1635,9 +1645,16 @@ export default function ExcelToPptTool() {
                       <div className="ep-info-line-1">
                         <b>{skuVal}</b> | <span>{descVal}</span>
                       </div>
-                      <div className="ep-info-line-2">
-                        <span>{cmVal}</span> | <span>{inVal}</span>
-                      </div>
+                      {(cmVal || inVal) && (
+                        <div className="ep-info-line-2">
+                          {[cmVal, inVal].filter(Boolean).map((d, i) => (
+                            <React.Fragment key={i}>
+                              {i > 0 && <span> | </span>}
+                              <span>{d}</span>
+                            </React.Fragment>
+                          ))}
+                        </div>
+                      )}
                       {priceVal && <div className="ep-info-line-3">{priceVal}</div>}
                     </div>
                   </div>
