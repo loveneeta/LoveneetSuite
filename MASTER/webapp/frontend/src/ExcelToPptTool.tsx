@@ -258,7 +258,14 @@ async function generateCustomPptClient(
   headerText?: string,
   showHeader: boolean = true,
   showRule: boolean = true,
-  selectedSlideIndex: number = 0
+  selectedSlideIndex: number = 0,
+  customLayout?: Slot[],
+  autoCenter: boolean = true,
+  fontSize: number = 14,
+  fontName: string = "Calibri",
+  fontColor: string = "000000",
+  background: string = "FFFFFF",
+  logoFile?: File | null
 ): Promise<Blob> {
   const excelBuf = await excelFile.arrayBuffer();
 
@@ -489,16 +496,44 @@ async function generateCustomPptClient(
     let nextSlideRId = Math.max(...[...slideRels.matchAll(/Id="rId(\d+)"/g)].map(item => parseInt(item[1])), 0) + 1;
     let picsXml = "";
 
+    // Apply custom background if specified
+    if (background && background.toUpperCase().replace("#", "") !== "FFFFFF") {
+      const bgHex = background.toUpperCase().replace("#", "");
+      const bgXml = `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="${bgHex}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>`;
+      if (!slideXml.includes("<p:bg>")) {
+        slideXml = slideXml.replace("<p:spTree>", `${bgXml}<p:spTree>`);
+      } else {
+        slideXml = slideXml.replace(/<p:bg>[\s\S]*?<\/p:bg>/, bgXml);
+      }
+    }
+
     for (let slotIdx = 0; slotIdx < slotsCount; slotIdx++) {
       const prodIdx = (sIdx - 1) * slotsCount + slotIdx;
       const prod = products[prodIdx];
       const slot = slotShapes[slotIdx];
+      const userSlot = customLayout && customLayout[slotIdx];
 
       if (prod && slot) {
         const dimStr = [prod.dim_cm, prod.dim_in].filter(Boolean).join(" | ");
-        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" b="1" sz="1100"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="1100"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="1000"><a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="1000"><a:latin typeface="Calibri"/></a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
+        const szMain = Math.round((fontSize || 14) * 100);
+        const szSub = Math.max(700, szMain - 200);
+        const fontNameClean = escapeXml(fontName || "Calibri");
+        const fontColorXml = fontColor ? `<a:srgbClr val="${fontColor.replace("#", "")}"/>` : "";
+
+        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" b="1" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
         
-        const updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);
+        let updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);
+
+        // Apply custom coordinates for text box if provided
+        if (userSlot) {
+          const textOffX = Math.round((userSlot.text[0] / 800) * cx);
+          const textOffY = Math.round((userSlot.text[1] / 450) * cy);
+          const textExtCx = Math.round(((userSlot.text[2] - userSlot.text[0]) / 800) * cx);
+          const textExtCy = Math.round(((userSlot.text[3] - userSlot.text[1]) / 450) * cy);
+          updatedSlot = updatedSlot.replace(/<a:off\s+x="\d+"\s+y="\d+"/, `<a:off x="${textOffX}" y="${textOffY}"`);
+          updatedSlot = updatedSlot.replace(/<a:ext\s+cx="\d+"\s+cy="\d+"/, `<a:ext cx="${textExtCx}" cy="${textExtCy}"`);
+        }
+
         slideXml = slideXml.replace(slot.rawXml, () => updatedSlot);
 
         let imgBuffer: ArrayBuffer | null = null;
@@ -540,10 +575,24 @@ async function generateCustomPptClient(
           const relEntry = `<Relationship Id="${imgRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imgFilename}"/>`;
           slideRels = slideRels.replace("</Relationships>", `${relEntry}</Relationships>`);
 
-          const picX = slot.offX;
-          const picY = Math.max(700000, slot.offY - 4400000);
-          const picW = slot.extCx;
-          const picH = Math.max(1000000, slot.offY - picY - 100000);
+          let picX = slot.offX;
+          let picY = Math.max(700000, slot.offY - 4400000);
+          let picW = slot.extCx;
+          let picH = Math.max(1000000, slot.offY - picY - 100000);
+
+          if (userSlot) {
+            let imgLeft = userSlot.img[0];
+            const imgW800 = userSlot.img[2] - userSlot.img[0];
+            if (autoCenter) {
+              const textCenterX = (userSlot.text[0] + userSlot.text[2]) / 2;
+              imgLeft = Math.max(0, Math.min(800 - imgW800, Math.round(textCenterX - imgW800 / 2)));
+            }
+            picX = Math.round((imgLeft / 800) * cx);
+            picY = Math.round((userSlot.img[1] / 450) * cy);
+            picW = Math.round((imgW800 / 800) * cx);
+            picH = Math.round(((userSlot.img[3] - userSlot.img[1]) / 450) * cy);
+          }
+
           const picId = 2000 + prodIdx;
 
           picsXml += `<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvPicPr><p:cNvPr id="${picId}" name="Picture ${picId}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${imgRelId}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${picX}" y="${picY}"/><a:ext cx="${picW}" cy="${picH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
@@ -619,6 +668,29 @@ export default function ExcelToPptTool() {
   const [showHeader, setShowHeader] = useState<boolean>(true);
   const [showRule, setShowRule] = useState<boolean>(true);
   const [logoFile, setLogoFile] = useState<File | null>(null);
+
+  // Drag state for interactive canvas
+  const [drag, setDrag] = useState<{
+    slot: number;
+    section: "img" | "text";
+    mode: "move" | "resize";
+    x: number;
+    y: number;
+    rect: number[];
+  } | null>(null);
+
+  const beginDrag = (
+    e: React.PointerEvent<any>,
+    slot: number,
+    section: "img" | "text",
+    mode: "move" | "resize" = "move"
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = layout[slot][section];
+    setDrag({ slot, section, mode, x: e.clientX, y: e.clientY, rect: [...rect] });
+    (e.currentTarget.closest(".ep-visual-canvas") as HTMLElement)?.setPointerCapture?.(e.pointerId);
+  };
 
   // Live preview pagination
   const [previewSlideIndex, setPreviewSlideIndex] = useState<number>(0);
@@ -912,6 +984,9 @@ export default function ExcelToPptTool() {
       if (slotsDetected === 2 || slotsDetected === 3) {
         setCount(slotsDetected as 2 | 3);
       }
+      if (activeSlide && activeSlide.slots && activeSlide.slots.length > 0) {
+        setLayout(activeSlide.slots.map(s => ({ img: [...s.img_rect], text: [...s.text_rect] })));
+      }
       setStatus(`Template inspected successfully: ${clientData.total_slides} slide(s), ${slotsDetected} product slots per slide.`);
     } catch (clientErr: any) {
       console.warn("Client inspect error:", clientErr);
@@ -981,7 +1056,14 @@ export default function ExcelToPptTool() {
         headerText,
         showHeader,
         showRule,
-        selectedSlideIndex
+        selectedSlideIndex,
+        layout,
+        autoCenter,
+        fontSize,
+        fontName,
+        fontColor,
+        background,
+        logoFile
       );
 
       const url = URL.createObjectURL(blob);
@@ -1154,7 +1236,17 @@ export default function ExcelToPptTool() {
                     <span>Select Product Page Layout Slide:</span>
                     <select
                       value={selectedSlideIndex}
-                      onChange={e => setSelectedSlideIndex(Number(e.target.value))}
+                      onChange={e => {
+                        const idx = Number(e.target.value);
+                        setSelectedSlideIndex(idx);
+                        const sl = templateInfo.slides[idx];
+                        if (sl && sl.slots && sl.slots.length > 0) {
+                          setLayout(sl.slots.map(s => ({ img: [...s.img_rect], text: [...s.text_rect] })));
+                          if (sl.slots_count === 2 || sl.slots_count === 3) {
+                            setCount(sl.slots_count as 2 | 3);
+                          }
+                        }
+                      }}
                     >
                       {templateInfo.slides.map((s, idx) => (
                         <option key={idx} value={idx}>
@@ -1372,20 +1464,354 @@ export default function ExcelToPptTool() {
         </section>
       )}
 
-      {/* Step 4: Product Image Fitting & Slide Controls */}
+      {/* Step 4: Product Image/Text Positioning, Sizing & Slide Layout */}
       <section className="ep-panel">
         <div className="ep-title">
           <div>
             <b>04</b>
             <div>
-              <h3>Image Fitting & Presentation Settings</h3>
-              <p>Configure how images scale inside slots and adjust layout parameters.</p>
+              <h3>Slide Layout, Image/Text Positioning & Sizing</h3>
+              <p>Visually drag & resize image or text boxes, enter exact pixel coordinates, customize fonts, colors, and layout structure.</p>
             </div>
           </div>
         </div>
 
-        {/* Image Fitting Option Cards */}
-        <div className="ep-template-title">
+        {/* Layout quick bar */}
+        <div className="ep-layout-options">
+          <label className="ep-ratio-picker">
+            <span>Slide shape</span>
+            <select value={ratio} onChange={e => setRatio(e.target.value as SlideRatio)}>
+              <option>16:9</option>
+              <option>4:3</option>
+              <option>A4 Landscape</option>
+              <option>A4 Portrait</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className={count === 2 ? "selected" : ""}
+            onClick={() => changeCount(2)}
+          >
+            2 products per slide
+          </button>
+          <button
+            type="button"
+            className={count === 3 ? "selected" : ""}
+            onClick={() => changeCount(3)}
+          >
+            3 products per slide
+          </button>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoCenter}
+            className={`ep-align-button ep-toggle ${autoCenter ? "is-on" : "is-off"}`}
+            onClick={() => setAutoCenter(v => !v)}
+          >
+            <span className="ep-toggle-track">
+              <span className="ep-toggle-thumb" />
+            </span>
+            <span>Center images to text</span>
+            <small>{autoCenter ? "ON" : "OFF"}</small>
+          </button>
+          <button type="button" className="ep-reset" onClick={resetLayout}>
+            <RotateCcw size={14} /> Reset layout
+          </button>
+        </div>
+
+        {/* Visual interactive drag canvas */}
+        <div className="ep-visual-guide">
+          <div className="ep-visual-heading">
+            <div>
+              <h4>Visual Slide Canvas & Positioning Guide</h4>
+              <p>Blue = image placement · Amber = product details placement · Drag boxes to move, drag bottom-right corner to resize</p>
+            </div>
+            <span>{ratio.toUpperCase()} SLIDE</span>
+          </div>
+
+          <div
+            className="ep-visual-canvas"
+            onPointerMove={e => {
+              if (!drag) return;
+              const r = e.currentTarget.getBoundingClientRect();
+              const dx = ((e.clientX - drag.x) / r.width) * 800;
+              const dy = ((e.clientY - drag.y) / r.height) * 450;
+              const [x, y, x2, y2] = drag.rect;
+              const w = x2 - x;
+              const h = y2 - y;
+
+              if (drag.mode === "resize") {
+                const nw = Math.max(30, Math.min(800 - x, Math.round(w + dx)));
+                const nh = Math.max(30, Math.min(450 - y, Math.round(h + dy)));
+                setLayout(prev =>
+                  prev.map((s, i) =>
+                    i === drag.slot ? { ...s, [drag.section]: [x, y, x + nw, y + nh] } : s
+                  )
+                );
+              } else {
+                const nx = Math.max(0, Math.min(800 - w, Math.round(x + dx)));
+                const ny = Math.max(0, Math.min(450 - h, Math.round(y + dy)));
+                setLayout(prev =>
+                  prev.map((s, i) =>
+                    i === drag.slot ? { ...s, [drag.section]: [nx, ny, nx + w, ny + h] } : s
+                  )
+                );
+              }
+            }}
+            onPointerUp={() => setDrag(null)}
+            onPointerCancel={() => setDrag(null)}
+            style={{
+              touchAction: "none",
+              backgroundColor: `#${background.replace("#", "")}`,
+              aspectRatio: String(ratioValue)
+            }}
+          >
+            {showHeader && (
+              <div className="ep-preview-header" style={{ color: `#${fontColor.replace("#", "")}` }}>
+                {headerText || "Your heading"}
+                {logoFile && <span className="ep-preview-logo">{logoFile.name.slice(0, 18)}</span>}
+              </div>
+            )}
+            {showRule && <div className="ep-preview-rule" />}
+
+            {layout.map((slot, i) => {
+              const imgW = slot.img[2] - slot.img[0];
+              const imgH = slot.img[3] - slot.img[1];
+              const textW = slot.text[2] - slot.text[0];
+              const textH = slot.text[3] - slot.text[1];
+              const imgLeft = autoCenter
+                ? Math.max(0, Math.min(800 - imgW, (slot.text[0] + slot.text[2]) / 2 - imgW / 2))
+                : slot.img[0];
+
+              return (
+                <React.Fragment key={i}>
+                  <div
+                    className="ep-visual-rect ep-visual-image"
+                    style={{
+                      left: `${imgLeft / 8}%`,
+                      top: `${slot.img[1] / 4.5}%`,
+                      width: `${imgW / 8}%`,
+                      height: `${imgH / 4.5}%`,
+                      cursor: "move",
+                      touchAction: "none"
+                    }}
+                    onPointerDown={e => beginDrag(e, i, "img", "move")}
+                  >
+                    <ImageIcon size={18} />
+                    <strong>Product {i + 1} Image</strong>
+                    <small>{imgW} × {imgH} px</small>
+                    <span
+                      className="ep-resize-handle"
+                      title="Drag corner to resize image area"
+                      onPointerDown={e => beginDrag(e, i, "img", "resize")}
+                    />
+                  </div>
+
+                  <div
+                    className="ep-visual-rect ep-visual-text"
+                    style={{
+                      left: `${slot.text[0] / 8}%`,
+                      top: `${slot.text[1] / 4.5}%`,
+                      width: `${textW / 8}%`,
+                      height: `${textH / 4.5}%`,
+                      color: `#${fontColor.replace("#", "")}`,
+                      cursor: "move",
+                      touchAction: "none"
+                    }}
+                    onPointerDown={e => beginDrag(e, i, "text", "move")}
+                  >
+                    <strong>Product {i + 1} Details</strong>
+                    <span>SKU / Product Name</span>
+                    <span>Dimensions</span>
+                    <span>Price</span>
+                    <span
+                      className="ep-resize-handle"
+                      title="Drag corner to resize text area"
+                      onPointerDown={e => beginDrag(e, i, "text", "resize")}
+                    />
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+
+          <div className="ep-visual-legend">
+            <span><i className="ep-legend-blue" /> Image placement</span>
+            <span><i className="ep-legend-amber" /> Text details placement</span>
+            <span>Drag items directly on canvas, or type exact dimensions and coordinates below.</span>
+          </div>
+        </div>
+
+        <div className="ep-drag-hint">
+          <ImageIcon size={15} /> Drag the blue image boxes or amber text boxes to move them, or drag the bottom-right corner to resize. You can also type exact Width & Height below.
+        </div>
+
+        {/* Exact Numeric Coordinate Inputs for Every Slot */}
+        <div className="ep-slots">
+          {layout.map((slot, i) => {
+            const imgWidth = slot.img[2] - slot.img[0];
+            const imgHeight = slot.img[3] - slot.img[1];
+            const textWidth = slot.text[2] - slot.text[0];
+            const textHeight = slot.text[3] - slot.text[1];
+
+            return (
+              <div key={i} className="ep-slot">
+                <h4>Product {i + 1} Placement</h4>
+
+                <div className="ep-coord-head">Image Area Coordinates & Dimensions</div>
+                <div className="ep-coords">
+                  <label>
+                    <span>Width (px)</span>
+                    <input
+                      type="number"
+                      min="30"
+                      max="800"
+                      value={imgWidth}
+                      onChange={e => {
+                        const w = Math.max(30, Number(e.target.value) || 30);
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, img: [s.img[0], s.img[1], s.img[0] + w, s.img[3]] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Height (px)</span>
+                    <input
+                      type="number"
+                      min="30"
+                      max="450"
+                      value={imgHeight}
+                      onChange={e => {
+                        const h = Math.max(30, Number(e.target.value) || 30);
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, img: [s.img[0], s.img[1], s.img[2], s.img[1] + h] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>X (Left)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="800"
+                      value={slot.img[0]}
+                      onChange={e => {
+                        const left = Number(e.target.value) || 0;
+                        const iw = slot.img[2] - slot.img[0];
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, img: [left, s.img[1], left + iw, s.img[3]] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Y (Top)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="450"
+                      value={slot.img[1]}
+                      onChange={e => {
+                        const top = Number(e.target.value) || 0;
+                        const ih = slot.img[3] - slot.img[1];
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, img: [s.img[0], top, s.img[2], top + ih] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div className="ep-coord-head">Text Details Coordinates & Dimensions</div>
+                <div className="ep-coords">
+                  <label>
+                    <span>Width (px)</span>
+                    <input
+                      type="number"
+                      min="30"
+                      max="800"
+                      value={textWidth}
+                      onChange={e => {
+                        const w = Math.max(30, Number(e.target.value) || 30);
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, text: [s.text[0], s.text[1], s.text[0] + w, s.text[3]] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Height (px)</span>
+                    <input
+                      type="number"
+                      min="30"
+                      max="450"
+                      value={textHeight}
+                      onChange={e => {
+                        const h = Math.max(30, Number(e.target.value) || 30);
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, text: [s.text[0], s.text[1], s.text[2], s.text[1] + h] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>X (Left)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="800"
+                      value={slot.text[0]}
+                      onChange={e => {
+                        const left = Number(e.target.value) || 0;
+                        const tw = slot.text[2] - slot.text[0];
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, text: [left, s.text[1], left + tw, s.text[3]] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Y (Top)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="450"
+                      value={slot.text[1]}
+                      onChange={e => {
+                        const top = Number(e.target.value) || 0;
+                        const th = slot.text[3] - slot.text[1];
+                        setLayout(prev =>
+                          prev.map((s, idx) =>
+                            idx === i ? { ...s, text: [s.text[0], top, s.text[2], top + th] } : s
+                          )
+                        );
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Product Image Fitting Mode */}
+        <div className="ep-template-title" style={{ marginTop: "18px" }}>
           <h4>Product Image Fitting Mode</h4>
           <p>Strictly preserves original image aspect ratio. Never distorts or squashes product photos.</p>
         </div>
@@ -1414,112 +1840,67 @@ export default function ExcelToPptTool() {
           </label>
         </div>
 
-        {/* If Built-in Mode, show font and layout controls */}
-        {!useCustomTemplate && (
-          <div className="ep-builtin-controls">
-            <div className="ep-layout-options">
-              <label className="ep-ratio-picker">
-                <span>Slide shape</span>
-                <select value={ratio} onChange={e => setRatio(e.target.value as SlideRatio)}>
-                  <option>16:9</option>
-                  <option>4:3</option>
-                  <option>A4 Landscape</option>
-                  <option>A4 Portrait</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                className={count === 2 ? "selected" : ""}
-                onClick={() => changeCount(2)}
-              >
-                2 products per slide
-              </button>
-              <button
-                type="button"
-                className={count === 3 ? "selected" : ""}
-                onClick={() => changeCount(3)}
-              >
-                3 products per slide
-              </button>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={autoCenter}
-                className={`ep-align-button ep-toggle ${autoCenter ? "is-on" : "is-off"}`}
-                onClick={() => setAutoCenter(v => !v)}
-              >
-                <span className="ep-toggle-track">
-                  <span className="ep-toggle-thumb" />
-                </span>
-                <span>Center images to text</span>
-                <small>{autoCenter ? "ON" : "OFF"}</small>
-              </button>
-              <button type="button" className="ep-reset" onClick={resetLayout}>
-                <RotateCcw size={14} /> Reset layout
-              </button>
-            </div>
-
-            <div className="ep-template-options">
-              <div className="ep-template-title">
-                <h4>Header & Brand Template</h4>
-                <p>Add a heading, a divider line and an optional corner logo.</p>
-              </div>
-              <label className="ep-header-field">
-                <span>Heading text</span>
-                <input
-                  type="text"
-                  value={headerText}
-                  onChange={e => setHeaderText(e.target.value)}
-                  placeholder="e.g. Beyond Wood — New Collection"
-                />
-              </label>
-              <div className="ep-template-toggles">
-                <label>
-                  <input type="checkbox" checked={showHeader} onChange={e => setShowHeader(e.target.checked)} /> Show heading
-                </label>
-                <label>
-                  <input type="checkbox" checked={showRule} onChange={e => setShowRule(e.target.checked)} /> Show divider line
-                </label>
-                <label>
-                  <input type="checkbox" checked={autoCenter} onChange={e => setAutoCenter(e.target.checked)} /> Auto-center images over text
-                </label>
-              </div>
-              <label className="ep-logo-upload">
-                <Upload size={16} />
-                <span>{logoFile ? logoFile.name : "Upload brand logo (PNG, JPG or SVG)"}</span>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={e => setLogoFile(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            <div className="ep-style-grid">
-              <label>
-                <span>Font size</span>
-                <input type="number" min="8" max="48" value={fontSize} onChange={e => setFontSize(Number(e.target.value))} />
-              </label>
-              <label>
-                <span>Font family</span>
-                <select value={fontName} onChange={e => setFontName(e.target.value)}>
-                  <option>Arial</option>
-                  <option>Calibri</option>
-                  <option>Manrope</option>
-                  <option>Times New Roman</option>
-                </select>
-              </label>
-              <label>
-                <span>Font color</span>
-                <input type="color" value={`#${fontColor.replace("#", "")}`} onChange={e => setFontColor(e.target.value)} />
-              </label>
-              <label>
-                <span>Slide background</span>
-                <input type="color" value={`#${background.replace("#", "")}`} onChange={e => setBackground(e.target.value)} />
-              </label>
-            </div>
+        {/* Header & Brand Template */}
+        <div className="ep-template-options">
+          <div className="ep-template-title">
+            <h4>Header & Brand Template</h4>
+            <p>Customize heading text, divider line and upload an optional brand logo.</p>
           </div>
-        )}
+          <label className="ep-header-field">
+            <span>Heading text</span>
+            <input
+              type="text"
+              value={headerText}
+              onChange={e => setHeaderText(e.target.value)}
+              placeholder="e.g. Beyond Wood — New Collection"
+            />
+          </label>
+          <div className="ep-template-toggles">
+            <label>
+              <input type="checkbox" checked={showHeader} onChange={e => setShowHeader(e.target.checked)} /> Show heading
+            </label>
+            <label>
+              <input type="checkbox" checked={showRule} onChange={e => setShowRule(e.target.checked)} /> Show divider line
+            </label>
+            <label>
+              <input type="checkbox" checked={autoCenter} onChange={e => setAutoCenter(e.target.checked)} /> Auto-center images over text
+            </label>
+          </div>
+          <label className="ep-logo-upload">
+            <Upload size={16} />
+            <span>{logoFile ? logoFile.name : "Upload brand logo (PNG, JPG or SVG)"}</span>
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={e => setLogoFile(e.target.files?.[0] ?? null)}
+            />
+          </label>
+        </div>
+
+        {/* Typography & Color Styling Grid */}
+        <div className="ep-style-grid">
+          <label>
+            <span>Font size (pt)</span>
+            <input type="number" min="8" max="48" value={fontSize} onChange={e => setFontSize(Number(e.target.value))} />
+          </label>
+          <label>
+            <span>Font family</span>
+            <select value={fontName} onChange={e => setFontName(e.target.value)}>
+              <option>Arial</option>
+              <option>Calibri</option>
+              <option>Manrope</option>
+              <option>Times New Roman</option>
+            </select>
+          </label>
+          <label>
+            <span>Font color</span>
+            <input type="color" value={`#${fontColor.replace("#", "")}`} onChange={e => setFontColor(e.target.value)} />
+          </label>
+          <label>
+            <span>Slide background</span>
+            <input type="color" value={`#${background.replace("#", "")}`} onChange={e => setBackground(e.target.value)} />
+          </label>
+        </div>
       </section>
 
       {/* Step 5: Live Slide Preview with Pager */}
