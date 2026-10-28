@@ -1018,3 +1018,23 @@
   border-radius: 3px;
   text-transform: uppercase;
 }
+
+.pptx-img-swap-select {
+  display: block;
+  width: 100%;
+  max-width: 80px;
+  margin-top: 4px;
+  background: #090e1a;
+  border: 1px solid #23314e;
+  border-radius: 4px;
+  color: #94a3b8;
+  font-size: 9px;
+  padding: 2px 4px;
+  cursor: pointer;
+  outline: none;
+}
+
+.pptx-img-swap-select:hover {
+  border-color: #6366f1;
+  color: #f1f5f9;
+}

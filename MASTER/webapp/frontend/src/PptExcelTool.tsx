@@ -38,6 +38,30 @@ type Img = {
   h?: number;
 };
 
+export type ExtractedProduct = {
+  id: string;
+  itemCode: string;
+  name: string;
+  material: string;
+  length: string;
+  width: string;
+  height: string;
+  lengthCm?: string;
+  widthCm?: string;
+  heightCm?: string;
+  lengthIn?: string;
+  widthIn?: string;
+  heightIn?: string;
+  cbm?: string;
+  price?: string;
+  currency?: string;
+  description: string;
+  primaryImage: Img | null;
+  candidateImages: Img[];
+  rawText: string;
+  values?: Record<string, string>;
+};
+
 type Slide = {
   slideNumber: number;
   sourceFile: string;
@@ -46,6 +70,7 @@ type Slide = {
   tables: string[][][];
   images: Img[];
   preview?: string;
+  products?: ExtractedProduct[];
 };
 
 type Col = { id: string; header: string; type: "text" | "image" };
@@ -55,6 +80,7 @@ type Row = {
   sourceFile: string;
   values: Record<string, string>;
   images: Record<string, Img | null>;
+  productId?: string;
 };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -102,6 +128,31 @@ const initialCols = PRESETS["🛋️ Furniture & Products"].map((h, i) => ({
   header: h,
   type: (/image|photo|picture/i.test(h) ? "image" : "text") as "text" | "image"
 }));
+
+const BANNER_RE = /^(?:NOBLE\s*SELECTIONS?.*|COLLECTION\s*\d*.*|CATALOG(?:UE)?.*|SPRING\s*\d+.*|FEBRUARY\s*FAIR.*|FAIR\s*\d+.*|AUTUMN\s*\d+.*|SUMMER\s*\d+.*|WINTER\s*\d+.*|PAGE\s*\d+.*|SLIDE\s*\d+.*)$/i;
+
+const MATERIAL_RE = /\b(?:mango\s*wood|sheesham(?:\s*wood)?|indian\s*rosewood|acacia(?:\s*wood)?|oak(?:\s*wood)?|pine(?:\s*wood)?|bamboo|teak(?:\s*wood)?|metal|iron|wrought\s*iron|cast\s*iron|mild\s*steel|stainless\s*steel|brass|copper|aluminum|marble|travertine|granite|quartz|solid\s*wood|wood|mdf|plywood|cane|rattan|wicker|fabric|leather|velvet|linen|cotton|glass|mirror|ceramic|terracotta|bone\s*inlay|mother\s*of\s*pearl|resin|terrazzo|jute)\b/i;
+
+const DIM_REGEX = /(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)(?:\s*(CM|CMS|CENTIMETERS?|INCH(?:ES)?|IN))?/gi;
+
+function getProductValue(p: ExtractedProduct, header: string): string {
+  const h = header.toLowerCase();
+  if (/sku|item\s*code|product\s*code|model\s*(?:no|number)?/.test(h)) return p.itemCode || "";
+  if (/product\s*name|item\s*name|^name$|title/.test(h)) return p.name || "";
+  if (/material|wood\s*type|finish/.test(h)) return p.material || "";
+  if (/cbm|cubic/.test(h)) return p.cbm || "";
+  if (/price|cost|retail|wholesale|trade/.test(h)) {
+    if (/currency|curr\b/.test(h)) return p.currency || "";
+    return p.price || "";
+  }
+  const unitIn = /\bin\b|inch/.test(h);
+  const unitCm = /\bcm\b|centimeter/.test(h);
+  if (/length|^l\b/.test(h)) return unitIn ? (p.lengthIn || p.length) : unitCm ? (p.lengthCm || p.length) : p.length;
+  if (/width|^w\b/.test(h)) return unitIn ? (p.widthIn || p.width) : unitCm ? (p.widthCm || p.width) : p.width;
+  if (/height|^h\b/.test(h)) return unitIn ? (p.heightIn || p.height) : unitCm ? (p.heightCm || p.height) : p.height;
+  if (/description|details|features/.test(h)) return p.description || "";
+  return p.values?.[header] || "";
+}
 
 function parseProductFields(lines: string[]) {
   const raw = lines.map(x => x.replace(/\s+/g, " ").trim()).filter(Boolean);
@@ -272,39 +323,60 @@ export default function PptExcelTool() {
   function makeRows(list: Slide[], currentCols = cols, currentMode = mode, shouldFilter = filterLogos) {
     const out: Row[] = [];
     list.forEach(s => {
-      const txt = [...s.text, ...s.tables.flat(2), ...s.images.map(x => x.ocrText || "")].filter(Boolean);
-      
-      // Filter out images classified as logos/header/footer if filterLogos is enabled
       const usableImages = shouldFilter
         ? s.images.filter(im => !im.isLogo)
         : s.images;
+      const fallbackImg = usableImages[0] || s.images[0] || null;
 
-      // In product mode, generate one row per real product image.
-      // If a slide has no product images, generate 1 row for the slide.
-      const imgList = currentMode === "product"
-        ? (usableImages.length ? usableImages : [null])
-        : [null];
+      // In product mode, use smart multi-product extraction if products exist
+      if (currentMode === "product" && s.products && s.products.length > 0) {
+        s.products.forEach(p => {
+          const values: Record<string, string> = {};
+          const images: Record<string, Img | null> = {};
 
-      imgList.forEach(im => {
-        const values: Record<string, string> = {};
-        const images: Record<string, Img | null> = {};
-        
-        // Pick primary product photo (avoid logo)
-        const fallbackImg = usableImages[0] || s.images[0] || null;
+          currentCols.forEach(c => {
+            if (c.type === "image") {
+              const assignedImg = p.primaryImage;
+              images[c.id] = shouldFilter && assignedImg?.isLogo ? fallbackImg : (assignedImg || fallbackImg);
+            } else {
+              values[c.id] = getProductValue(p, c.header);
+            }
+          });
 
-        currentCols.forEach(c => {
-          values[c.id] = c.type === "text" ? suggest(txt, c.header) : "";
-          images[c.id] = c.type === "image" ? (im || fallbackImg) : null;
+          out.push({
+            id: uid(),
+            slideNumber: s.slideNumber,
+            sourceFile: s.sourceFile,
+            productId: p.id,
+            values,
+            images
+          });
         });
+      } else {
+        // Fallback for slide-mode or slides without detected products
+        const txt = [...s.text, ...s.tables.flat(2), ...s.images.map(x => x.ocrText || "")].filter(Boolean);
+        const imgList = currentMode === "product"
+          ? (usableImages.length ? usableImages : [null])
+          : [null];
 
-        out.push({
-          id: uid(),
-          slideNumber: s.slideNumber,
-          sourceFile: s.sourceFile,
-          values,
-          images
+        imgList.forEach(im => {
+          const values: Record<string, string> = {};
+          const images: Record<string, Img | null> = {};
+
+          currentCols.forEach(c => {
+            values[c.id] = c.type === "text" ? suggest(txt, c.header) : "";
+            images[c.id] = c.type === "image" ? (im || fallbackImg) : null;
+          });
+
+          out.push({
+            id: uid(),
+            slideNumber: s.slideNumber,
+            sourceFile: s.sourceFile,
+            values,
+            images
+          });
         });
-      });
+      }
     });
     setRows(out);
   }
@@ -387,7 +459,6 @@ export default function PptExcelTool() {
 
         setProgress({ current: 0, total: slideNames.length });
 
-        // First pass: parse all slides and extract picture nodes with geometry
         type RawImgItem = {
           embedId: string;
           targetPath: string;
@@ -397,7 +468,21 @@ export default function PptExcelTool() {
           h: number;
         };
 
-        const slideRawImages: { slideIdx: number; texts: string[]; tables: string[][][]; items: RawImgItem[] }[] = [];
+        type TextShapeItem = {
+          x: number;
+          y: number;
+          w: number;
+          h: number;
+          paras: string[];
+        };
+
+        const slideRawData: {
+          slideIdx: number;
+          shapes: TextShapeItem[];
+          tables: string[][][];
+          items: RawImgItem[];
+        }[] = [];
+
         const imageFileSlideCounts = new Map<string, Set<number>>();
 
         for (let ix = 0; ix < slideNames.length; ix++) {
@@ -409,10 +494,59 @@ export default function PptExcelTool() {
             throw new Error("Could not parse slide XML: " + path);
           }
 
-          const texts = Array.from(xml.getElementsByTagNameNS("*", "t"))
-            .map(n => (n.textContent || "").trim())
-            .filter(Boolean);
+          // Parse shapes with coordinates and paragraphs
+          const shapes: TextShapeItem[] = [];
+          const spNodes = Array.from(xml.getElementsByTagNameNS("*", "sp"));
+          spNodes.forEach(sp => {
+            let x = 0, y = 0, w = 0, h = 0;
+            const xfrm = sp.getElementsByTagNameNS("*", "xfrm")[0];
+            if (xfrm) {
+              const off = xfrm.getElementsByTagNameNS("*", "off")[0];
+              const ext = xfrm.getElementsByTagNameNS("*", "ext")[0];
+              if (off) {
+                x = Number(off.getAttribute("x") || 0);
+                y = Number(off.getAttribute("y") || 0);
+              }
+              if (ext) {
+                w = Number(ext.getAttribute("cx") || 0);
+                h = Number(ext.getAttribute("cy") || 0);
+              }
+            }
 
+            // Check parent group offset if shape x, y are relative to group
+            let parent = sp.parentElement;
+            while (parent && parent !== xml.documentElement) {
+              if (parent.localName === "grpSp") {
+                const grpXfrm = parent.getElementsByTagNameNS("*", "xfrm")[0];
+                if (grpXfrm) {
+                  const grpOff = grpXfrm.getElementsByTagNameNS("*", "off")[0];
+                  if (grpOff) {
+                    const gx = Number(grpOff.getAttribute("x") || 0);
+                    const gy = Number(grpOff.getAttribute("y") || 0);
+                    if (gx > 0 && x === 0) x = gx;
+                    if (gy > 0 && y === 0) y = gy;
+                  }
+                }
+                break;
+              }
+              parent = parent.parentElement;
+            }
+
+            const paras: string[] = [];
+            Array.from(sp.getElementsByTagNameNS("*", "p")).forEach(p => {
+              const ptxt = Array.from(p.getElementsByTagNameNS("*", "t"))
+                .map(t => t.textContent || "")
+                .join("")
+                .trim();
+              if (ptxt) paras.push(ptxt);
+            });
+
+            if (paras.length > 0) {
+              shapes.push({ x, y, w, h, paras });
+            }
+          });
+
+          // Tables
           const tables: string[][][] = [];
           Array.from(xml.getElementsByTagNameNS("*", "tbl")).forEach(tbl => {
             const table: string[][] = [];
@@ -429,6 +563,7 @@ export default function PptExcelTool() {
             if (table.length) tables.push(table);
           });
 
+          // Slide relationships
           const relPath = path.replace("slides/", "slides/_rels/") + ".rels";
           const relText = await zip.file(relPath)?.async("text");
           const rels = new Map<string, string>();
@@ -444,7 +579,7 @@ export default function PptExcelTool() {
             });
           }
 
-          // Extract picture nodes with their exact slide positioning
+          // Picture & Blip nodes with coordinates
           const rawItems: RawImgItem[] = [];
           const blipNodes = Array.from(xml.getElementsByTagNameNS("*", "blip"));
 
@@ -468,7 +603,6 @@ export default function PptExcelTool() {
                   }, [] as string[])
                   .join("/");
 
-            // Traverse upward to find <a:xfrm> for position and dimension
             let x = 0, y = 0, w = 0, h = 0;
             let currNode: Node | null = blipNode;
             while (currNode && currNode !== xml) {
@@ -492,6 +626,29 @@ export default function PptExcelTool() {
               currNode = currNode.parentNode;
             }
 
+            // Also check if inside a group shape with offset
+            let pNode: Node | null = blipNode;
+            while (pNode && pNode !== xml) {
+              if (pNode.nodeType === 1 && (pNode as Element).localName === "grpSp") {
+                const grpEl = pNode as Element;
+                const grpXfrm = grpEl.getElementsByTagNameNS("*", "xfrm")[0];
+                if (grpXfrm) {
+                  const grpOff = grpXfrm.getElementsByTagNameNS("*", "off")[0];
+                  const grpExt = grpXfrm.getElementsByTagNameNS("*", "ext")[0];
+                  if (grpOff && (x === 0 || y === 0)) {
+                    x = Number(grpOff.getAttribute("x") || 0);
+                    y = Number(grpOff.getAttribute("y") || 0);
+                  }
+                  if (grpExt && (w === 0 || h === 0)) {
+                    w = Number(grpExt.getAttribute("cx") || 0);
+                    h = Number(grpExt.getAttribute("cy") || 0);
+                  }
+                }
+                break;
+              }
+              pNode = pNode.parentNode;
+            }
+
             rawItems.push({
               embedId: embed,
               targetPath: imagePath,
@@ -507,9 +664,9 @@ export default function PptExcelTool() {
             imageFileSlideCounts.get(imagePath)!.add(ix + 1);
           });
 
-          slideRawImages.push({
+          slideRawData.push({
             slideIdx: ix + 1,
-            texts,
+            shapes,
             tables,
             items: rawItems
           });
@@ -517,8 +674,8 @@ export default function PptExcelTool() {
           setProgress({ current: ix + 1, total: slideNames.length });
         }
 
-        // Second pass: classify images based on repetition & position
-        for (const slideData of slideRawImages) {
+        // Second pass: load image binary data and filter logos
+        for (const slideData of slideRawData) {
           const images: Img[] = [];
 
           for (let im = 0; im < slideData.items.length; im++) {
@@ -540,53 +697,216 @@ export default function PptExcelTool() {
                 tiff: "image/tiff"
               } as Record<string, string>)[ext] || "image/png";
 
-            // Relative positioning
             const relX = sldWidth > 0 ? item.x / sldWidth : 0;
             const relY = sldHeight > 0 ? item.y / sldHeight : 0;
             const relW = sldWidth > 0 ? item.w / sldWidth : 0;
             const relH = sldHeight > 0 ? item.h / sldHeight : 0;
 
-            // Heuristics:
-            // 1. Logo at top-right corner (relY < 22%, relX > 65%, moderate size)
+            // Heuristics to exclude logos, headers, footers & divider lines
             const isTopRightCorner = relY < 0.22 && relX > 0.65 && relW < 0.35 && relH < 0.25;
-
-            // 2. Logo at top-left corner (relY < 22%, relX < 28%, moderate size)
             const isTopLeftCorner = relY < 0.22 && relX < 0.28 && relW < 0.35 && relH < 0.25;
-
-            // 3. Footer mark or bottom footer line (relY > 80% of slide)
-            const isFooter = relY > 0.80;
-
-            // 4. Divider line or thin banner (height < 2.5% of slide or very wide thin line)
-            const isDividerLine = relH < 0.025 || (relW > 0.4 && relH < 0.035);
-
-            // 5. Repeated brand image across multiple slides (e.g. logo appears on 2+ slides)
+            const isFooter = relY > 0.82;
+            const isDividerLine = relH < 0.025 || (relW > 0.4 && relH < 0.035) || (item.h > 0 && item.h < 50000);
             const slideCountForImg = imageFileSlideCounts.get(item.targetPath)?.size || 1;
             const isRepeatedAcrossSlides = slideNames.length >= 2 && slideCountForImg >= 2;
 
             const isLogo = isTopRightCorner || isTopLeftCorner || isFooter || isDividerLine || isRepeatedAcrossSlides;
             const role = isFooter || isDividerLine ? "footer" : isLogo ? "logo" : "product";
 
-            images.push({
-              id: "s" + slideData.slideIdx + "i" + (im + 1),
-              name: item.targetPath.split("/").pop() || `image_${im}.${ext}`,
-              mime,
-              data,
-              isLogo,
-              role,
-              x: item.x,
-              y: item.y,
-              w: item.w,
-              h: item.h
+            // Avoid duplicate identical target images on same slide
+            if (!images.some(existing => existing.name === item.targetPath.split("/").pop())) {
+              images.push({
+                id: "s" + slideData.slideIdx + "i" + (im + 1),
+                name: item.targetPath.split("/").pop() || `image_${im}.${ext}`,
+                mime,
+                data,
+                isLogo,
+                role,
+                x: item.x,
+                y: item.y,
+                w: item.w,
+                h: item.h
+              });
+            }
+          }
+
+          // Intelligent Product Segmentation on Slide
+          const usablePhotos = images.filter(img => !img.isLogo && img.role === "product");
+          const candidatePhotos = usablePhotos.length > 0 ? usablePhotos : images;
+
+          let collectionName = "";
+          let slideMaterial = "";
+
+          // Check collection names and slide-wide material notes
+          slideData.shapes.forEach(s => {
+            const joined = s.paras.join(" ").trim();
+            if (/^[A-Z0-9a-z\s]+collection$/i.test(joined)) {
+              collectionName = joined;
+            }
+            const matM = joined.match(MATERIAL_RE);
+            if (matM && !slideMaterial) {
+              slideMaterial = matM[0].replace(/^[a-z]/, c => c.toUpperCase());
+            }
+          });
+
+          const extractedProducts: ExtractedProduct[] = [];
+
+          slideData.shapes.forEach(s => {
+            const paras = s.paras;
+            const joined = paras.join(" ").trim();
+            if (BANNER_RE.test(joined) || /^[A-Z0-9a-z\s]+collection$/i.test(joined)) {
+              return;
+            }
+
+            let itemCode = "";
+            let name = "";
+            let l = "", w = "", h = "";
+            let lIn = "", wIn = "", hIn = "";
+            let desc = "";
+            let mat = slideMaterial;
+
+            paras.forEach(p => {
+              // 1. Code | Name pattern: e.g. "69210 | Coffee table"
+              const codeNameM = p.match(/^\s*([A-Z0-9\/-]+(?:\s*\/[A-Z0-9\/-]+)?)\s*\|\s*([^|]+)$/);
+              if (codeNameM) {
+                itemCode = codeNameM[1].trim();
+                name = codeNameM[2].trim();
+                return;
+              }
+
+              // 2. Dimensions pattern: e.g. "140 x 60 x 42 CM | 55 x 23 x 16 IN"
+              const allDims = [...p.matchAll(/(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)(?:\s*(CM|CMS|INCH(?:ES)?|IN))?/gi)];
+              if (allDims.length > 0) {
+                l = allDims[0][1];
+                w = allDims[0][2];
+                h = allDims[0][3];
+                if (allDims.length > 1) {
+                  lIn = allDims[1][1];
+                  wIn = allDims[1][2];
+                  hIn = allDims[1][3];
+                }
+                const parts = p.split("|");
+                if (parts.length > 1) {
+                  desc = parts.slice(1).join(" | ").trim();
+                }
+                return;
+              }
+
+              // 3. Material check
+              const pMatM = p.match(MATERIAL_RE);
+              if (pMatM && (!name || pMatM[0].toLowerCase() !== name.toLowerCase())) {
+                mat = pMatM[0].replace(/^[a-z]/, c => c.toUpperCase());
+              }
+
+              // 4. Labeled fields
+              if (/^(?:item\s*code|sku|code|model)\s*[:=-]\s*(.*)$/i.test(p)) {
+                itemCode = p.replace(/^(?:item\s*code|sku|code|model)\s*[:=-]\s*/i, "").trim();
+              } else if (/^(?:product\s*name|name|title)\s*[:=-]\s*(.*)$/i.test(p)) {
+                name = p.replace(/^(?:product\s*name|name|title)\s*[:=-]\s*/i, "").trim();
+              } else if (/^(?:material|finish|wood|timber)\s*[:=-]\s*(.*)$/i.test(p)) {
+                mat = p.replace(/^(?:material|finish|wood|timber)\s*[:=-]\s*/i, "").trim();
+              } else if (!name && !BANNER_RE.test(p) && p.length > 2 && !/^(?:Price|Cost|USD|\$)/i.test(p)) {
+                name = p;
+              }
             });
+
+            if (itemCode || (name && (l || w || h))) {
+              // Pair with closest image using spatial Euclidean distance
+              let bestImg: Img | null = null;
+              let minDist = Infinity;
+              const scX = s.x + s.w / 2;
+              const scY = s.y + s.h / 2;
+
+              candidatePhotos.forEach(im => {
+                const icX = (im.x || 0) + (im.w || 0) / 2;
+                const icY = (im.y || 0) + (im.h || 0) / 2;
+                const dist = Math.pow(scX - icX, 2) + Math.pow(scY - icY, 2);
+                if (dist < minDist) {
+                  minDist = dist;
+                  bestImg = im;
+                }
+              });
+
+              // Clean description: include collection and secondary imperial dimensions if present
+              const fullDesc = [collectionName, desc].filter(Boolean).join(" · ").trim();
+
+              extractedProducts.push({
+                id: uid(),
+                slideNumber: slideData.slideIdx,
+                sourceFile: file.name,
+                itemCode,
+                name,
+                material: mat,
+                length: l,
+                width: w,
+                height: h,
+                lengthCm: l,
+                widthCm: w,
+                heightCm: h,
+                lengthIn: lIn || l,
+                widthIn: wIn || w,
+                heightIn: hIn || h,
+                description: fullDesc,
+                primaryImage: bestImg || candidatePhotos[0] || null,
+                candidateImages: candidatePhotos,
+                rawText: paras.join(" | ")
+              });
+            }
+          });
+
+          // Single-product slide handling
+          if (extractedProducts.length === 0 && (slideData.shapes.length > 0 || candidatePhotos.length > 0)) {
+            const allTextLines = slideData.shapes.flatMap(s => s.paras).filter(t => !BANNER_RE.test(t));
+            if (allTextLines.length > 0 || candidatePhotos.length > 0) {
+              const pf = parseProductFields(allTextLines);
+              let cleanName = pf.name;
+              if (BANNER_RE.test(cleanName)) {
+                cleanName = allTextLines.find(line => !BANNER_RE.test(line) && line.length > 2) || `Product Slide ${slideData.slideIdx}`;
+              }
+
+              let heroImg = candidatePhotos[0] || null;
+              let maxArea = 0;
+              candidatePhotos.forEach(im => {
+                const area = (im.w || 0) * (im.h || 0);
+                if (area > maxArea) {
+                  maxArea = area;
+                  heroImg = im;
+                }
+              });
+
+              extractedProducts.push({
+                id: uid(),
+                slideNumber: slideData.slideIdx,
+                sourceFile: file.name,
+                itemCode: pf.sku || "",
+                name: cleanName,
+                material: pf.material || slideMaterial,
+                length: pf.lengthCm || pf.lengthIn || "",
+                width: pf.widthCm || pf.widthIn || "",
+                height: pf.heightCm || pf.heightIn || "",
+                lengthCm: pf.lengthCm,
+                widthCm: pf.widthCm,
+                heightCm: pf.heightCm,
+                lengthIn: pf.lengthIn,
+                widthIn: pf.widthIn,
+                heightIn: pf.heightIn,
+                cbm: pf.cbm,
+                description: collectionName ? `${collectionName} · ${pf.description}` : pf.description,
+                primaryImage: heroImg,
+                candidateImages: candidatePhotos,
+                rawText: allTextLines.join(" | ")
+              });
+            }
           }
 
           all.push({
             slideNumber: slideData.slideIdx,
             sourceFile: file.name,
-            title: slideData.texts[0] || `Slide ${slideData.slideIdx}`,
-            text: slideData.texts,
+            title: extractedProducts[0]?.name || slideData.shapes[0]?.paras[0] || `Slide ${slideData.slideIdx}`,
+            text: slideData.shapes.flatMap(s => s.paras),
             tables: slideData.tables,
-            images
+            images,
+            products: extractedProducts
           });
         }
       }
@@ -595,12 +915,11 @@ export default function PptExcelTool() {
       setSel(0);
       makeRows(all, cols, mode, filterLogos);
 
-      const totalImages = all.reduce((sum, s) => sum + s.images.length, 0);
+      const totalExtractedProducts = all.reduce((sum, s) => sum + (s.products?.length || 0), 0);
       const logoCount = all.reduce((sum, s) => sum + s.images.filter(im => im.isLogo).length, 0);
-      const productCount = totalImages - logoCount;
 
       setStatus(
-        `✓ Extracted ${all.length} slide(s) · ${productCount} product photos found (${logoCount} corner logos/footers automatically filtered).`
+        `✓ Extracted ${all.length} slide(s) · ${totalExtractedProducts} product(s) identified with matched photos (${logoCount} logos/footers automatically filtered).`
       );
     } catch (e: any) {
       setError(e.message || "Could not extract presentation.");
@@ -1274,20 +1593,57 @@ export default function PptExcelTool() {
                     {cols.map(c => (
                       <td key={c.id}>
                         {c.type === "image" ? (
-                          r.images[c.id] ? (
-                            <div className="pptx-cell-img-wrap">
+                          <div className="pptx-cell-img-wrap">
+                            {r.images[c.id] ? (
                               <img
                                 className="pptx-cellimg"
                                 src={uri(r.images[c.id]!)}
                                 alt="Cell product"
+                                title="Click to view full image in new tab"
+                                onClick={() => {
+                                  const win = window.open("");
+                                  win?.document.write(`<html><body style="margin:0;background:#0b1120;display:grid;place-items:center;min-height:100vh;"><img src="${uri(r.images[c.id]!)}" style="max-width:95vw;max-height:95vh;object-fit:contain;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,0.5);" /></body></html>`);
+                                }}
+                                style={{ cursor: "pointer" }}
                               />
-                              {r.images[c.id]?.isLogo && (
-                                <span className="pptx-logo-tag">Logo</span>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="pptx-empty-cell">No Image</span>
-                          )
+                            ) : (
+                              <span className="pptx-empty-cell">No Image</span>
+                            )}
+                            {r.images[c.id]?.isLogo && (
+                              <span className="pptx-logo-tag">Logo</span>
+                            )}
+                            {(() => {
+                              const s = slides.find(sl => sl.slideNumber === r.slideNumber && sl.sourceFile === r.sourceFile);
+                              const usable = s ? (filterLogos ? s.images.filter(im => !im.isLogo) : s.images) : [];
+                              if (usable.length > 1) {
+                                return (
+                                  <select
+                                    className="pptx-img-swap-select"
+                                    value={r.images[c.id]?.id || ""}
+                                    onChange={e => {
+                                      const selectedImg = s?.images.find(im => im.id === e.target.value) || null;
+                                      setRows(prev =>
+                                        prev.map(rowItem =>
+                                          rowItem.id === r.id
+                                            ? { ...rowItem, images: { ...rowItem.images, [c.id]: selectedImg } }
+                                            : rowItem
+                                        )
+                                      );
+                                    }}
+                                    title="Switch to another photo from this slide"
+                                  >
+                                    <option value="">— Swap Photo —</option>
+                                    {usable.map((u, ui) => (
+                                      <option key={u.id} value={u.id}>
+                                        Photo {ui + 1}
+                                      </option>
+                                    ))}
+                                  </select>
+                                );
+                              }
+                              return null;
+                            })()}
+                          </div>
                         ) : (
                           <input
                             value={r.values[c.id] || ""}
