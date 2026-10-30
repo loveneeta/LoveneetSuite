@@ -30,8 +30,11 @@ import { storageAdapter, isDesktop } from "./services/platform";
 import {
   generateCataloguePptx,
   Mapping,
-  GenerationOutput
+  GenerationOutput,
+  extractCellValue,
+  getOrderedSlideFiles
 } from "./services/pptxGenerator";
+import { parseXmlDocument } from "./services/xmlHelper";
 import {
   Slot,
   ProductsPerSlide,
@@ -99,6 +102,15 @@ type MappingProfile = {
   selectedSlideIndex: number;
   count?: ProductsPerSlide;
   layout?: Slot[];
+  fontSize?: number;
+  fontName?: string;
+  fontColor?: string;
+  background?: string;
+  ratio?: SlideRatio;
+  autoCenter?: boolean;
+  showHeader?: boolean;
+  showRule?: boolean;
+  headerText?: string;
 };
 
 const ROLE_DEFINITIONS: Array<{
@@ -155,12 +167,10 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
   const ratioVal = wIn / Math.max(0.1, hIn);
   const aspectRatio = Math.abs(ratioVal - 16 / 9) < 0.1 ? "16:9" : (Math.abs(ratioVal - 4 / 3) < 0.1 ? "4:3" : `${wIn}:${hIn}`);
 
-  const slideFiles = Object.keys(zip.files).filter(k => /^ppt\/slides\/slide\d+\.xml$/i.test(k));
-  slideFiles.sort((a, b) => {
-    const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0", 10);
-    const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0", 10);
-    return na - nb;
-  });
+  const presRelsText = (await zip.file("ppt/_rels/presentation.xml.rels")?.async("text")) || "";
+  const presDoc = parseXmlDocument(presXmlText);
+  const presRelsDoc = parseXmlDocument(presRelsText);
+  const slideFiles = getOrderedSlideFiles(zip, presDoc, presRelsDoc);
 
   const slides: TemplateSlideInfo[] = [];
   for (let sIdx = 0; sIdx < slideFiles.length; sIdx++) {
@@ -243,6 +253,10 @@ async function inspectTemplateClient(fileOrBuf: File | ArrayBuffer): Promise<Tem
 export default function ExcelToPptTool() {
   // File states
   const [file, setFile] = useState<File | null>(null);
+  const [workbookRef, setWorkbookRef] = useState<ExcelJS.Workbook | null>(null);
+  const [availableSheets, setAvailableSheets] = useState<string[]>([]);
+  const [selectedSheetName, setSelectedSheetName] = useState<string>("");
+  const [missingImageCount, setMissingImageCount] = useState<number>(0);
   const [headers, setHeaders] = useState<string[]>([]);
   const [sampleRows, setSampleRows] = useState<Array<Record<string, any>>>([]);
   const [mapping, setMapping] = useState<Mapping>(initialMapping);
@@ -273,6 +287,15 @@ export default function ExcelToPptTool() {
   const [showHeader, setShowHeader] = useState<boolean>(true);
   const [showRule, setShowRule] = useState<boolean>(true);
   const [logoFile, setLogoFile] = useState<File | null>(null);
+
+  const logoUrl = useMemo(() => {
+    if (!logoFile) return "";
+    try {
+      return URL.createObjectURL(logoFile);
+    } catch {
+      return "";
+    }
+  }, [logoFile]);
 
   // Drag state for interactive canvas
   const [drag, setDrag] = useState<{
@@ -342,7 +365,16 @@ export default function ExcelToPptTool() {
       imageFit,
       selectedSlideIndex,
       count,
-      layout: layout.map(s => ({ img: [...s.img], text: [...s.text] }))
+      layout: layout.map(s => ({ img: [...s.img], text: [...s.text] })),
+      fontSize,
+      fontName,
+      fontColor,
+      background,
+      ratio,
+      autoCenter,
+      showHeader,
+      showRule,
+      headerText
     };
     const updated = [...profiles.filter(p => p.name.toLowerCase() !== name.toLowerCase()), newProfile];
     setProfiles(updated);
@@ -367,6 +399,15 @@ export default function ExcelToPptTool() {
         setLayout(adjustLayoutSlots([], targetCount));
       }
     }
+    if (typeof p.fontSize === "number") setFontSize(p.fontSize);
+    if (p.fontName) setFontName(p.fontName);
+    if (p.fontColor) setFontColor(p.fontColor);
+    if (p.background) setBackground(p.background);
+    if (p.ratio) setRatio(p.ratio);
+    if (typeof p.autoCenter === "boolean") setAutoCenter(p.autoCenter);
+    if (typeof p.showHeader === "boolean") setShowHeader(p.showHeader);
+    if (typeof p.showRule === "boolean") setShowRule(p.showRule);
+    if (typeof p.headerText === "string") setHeaderText(p.headerText);
     setStatus(`Loaded profile "${name}".`);
   };
 
@@ -378,9 +419,123 @@ export default function ExcelToPptTool() {
     setStatus(`Deleted profile "${name}".`);
   };
 
+  // Load Worksheet Data into State
+  const loadWorksheetData = (workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet) => {
+    // Extract cell-anchored image thumbnails for live preview
+    const imgThumbnails: Record<number, string> = {};
+    try {
+      const images = sheet.getImages ? sheet.getImages() : [];
+      for (const img of images) {
+        let rowNum = 0;
+        if (img.range && img.range.tl) {
+          if (typeof img.range.tl.nativeRow === "number") {
+            rowNum = Math.floor(img.range.tl.nativeRow) + 1;
+          } else if (typeof img.range.tl.row === "number") {
+            rowNum = Math.floor(img.range.tl.row) + 1;
+          }
+        }
+        const media = workbook.model?.media?.[img.imageId] || (workbook.model?.media || []).find(
+          (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
+        );
+        if (media && media.buffer && rowNum > 0 && !imgThumbnails[rowNum]) {
+          const blob = new Blob([media.buffer], { type: `image/${media.extension || "jpeg"}` });
+          imgThumbnails[rowNum] = URL.createObjectURL(blob);
+        }
+      }
+    } catch (e) {
+      console.warn("Could not load preview thumbnails:", e);
+    }
+
+    // Collect headers from row 1 and row 2 with duplicate disambiguation
+    const counts: Record<string, number> = {};
+    const disambiguate = (name: string): string => {
+      const trimmed = name.trim();
+      if (!trimmed) return "";
+      counts[trimmed] = (counts[trimmed] || 0) + 1;
+      return counts[trimmed] > 1 ? `${trimmed} (${counts[trimmed]})` : trimmed;
+    };
+
+    const r1Raw = (sheet.getRow(1).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
+    let colNames = r1Raw.map(disambiguate);
+    if (colNames.length < 3 && sheet.rowCount >= 2) {
+      const r2Raw = (sheet.getRow(2).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
+      const r2Unique = r2Raw.filter(h => !colNames.some(c => c.toLowerCase() === h.toLowerCase()));
+      colNames = [...colNames, ...r2Unique.map(disambiguate)];
+    }
+    setHeaders(colNames);
+
+    // Extract sample data rows (up to 30 rows for live preview)
+    const dataRows: Array<Record<string, any>> = [];
+    const startRow = sheet.rowCount >= 3 && !sheet.getRow(2).getCell(1).value ? 3 : 2;
+    sheet.eachRow((row, rowNumber) => {
+      if (rowNumber >= startRow && dataRows.length < 30) {
+        const rowObj: Record<string, any> = {};
+        colNames.forEach((hdr) => {
+          let cIndex = -1;
+          const cleanBaseHdr = hdr.replace(/\s*\(\d+\)$/, "").toLowerCase();
+          const r1Vals = sheet.getRow(1).values as Array<unknown>;
+          const r2Vals = sheet.getRow(2).values as Array<unknown>;
+          if (r1Vals) {
+            const idx = r1Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
+            if (idx > 0) cIndex = idx;
+          }
+          if (cIndex === -1 && r2Vals) {
+            const idx = r2Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
+            if (idx > 0) cIndex = idx;
+          }
+          if (cIndex > 0) {
+            rowObj[hdr] = extractCellValue(row.getCell(cIndex));
+          }
+        });
+        if (Object.values(rowObj).some(Boolean)) {
+          rowObj["__thumbnail"] = imgThumbnails[rowNumber] || "";
+          dataRows.push(rowObj);
+        }
+      }
+    });
+    setSampleRows(dataRows);
+
+    // Intelligent Auto-Mapping
+    const findCol = (...needles: string[]) =>
+      colNames.find(h => needles.some(n => h.toLowerCase() === n.toLowerCase() || h.toLowerCase().includes(n.toLowerCase()))) ?? "";
+
+    const autoMapped: Mapping = {
+      code: findCol("buyer code", "buyer code / sku", "sku", "item code", "product code", "code"),
+      description: findCol("product description", "description", "product name", "product", "item name", "desc"),
+      dim_cm: findCol("product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)"),
+      dim_in: findCol("carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)"),
+      price: findCol("price (usd)", "price", "mrp", "rate", "cost", "qyt"),
+      length: findCol("length", " l", "len"),
+      width: findCol("width", "breadth", " w", "wid"),
+      height: findCol("height", " h", "hgt"),
+      image: findCol("product image (embedded)", "product image", "image", "photo", "picture", "img")
+    };
+    setMapping(autoMapped);
+
+    const embeddedCount = Object.keys(imgThumbnails).length;
+    const missingCount = Math.max(0, dataRows.length - embeddedCount);
+    setMissingImageCount(missingCount);
+
+    const warningText = missingCount > 0 ? ` (${missingCount} product(s) missing embedded photos)` : "";
+    setStatus(`Loaded ${colNames.length} columns and ${dataRows.length} product rows from sheet "${sheet.name}" (${embeddedCount} embedded photos detected)${warningText}.`);
+  };
+
+  // Handle Worksheet Switch
+  const handleSheetChange = (name: string) => {
+    if (!workbookRef) return;
+    const targetSheet = workbookRef.getWorksheet(name) || workbookRef.worksheets[0];
+    if (targetSheet) {
+      setSelectedSheetName(targetSheet.name);
+      loadWorksheetData(workbookRef, targetSheet);
+    }
+  };
+
   // Handle Excel Upload
   const chooseFile = async (next: File | null) => {
     setFile(next);
+    setWorkbookRef(null);
+    setAvailableSheets([]);
+    setSelectedSheetName("");
     setHeaders([]);
     setSampleRows([]);
     setLastResult(null);
@@ -389,95 +544,17 @@ export default function ExcelToPptTool() {
     try {
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(await next.arrayBuffer());
-      const sheet = workbook.worksheets[0];
-      if (!sheet) {
+      if (!workbook.worksheets || workbook.worksheets.length === 0) {
         setStatus("No worksheets found in this workbook.");
         return;
       }
 
-      // Extract cell-anchored image thumbnails for live preview
-      const imgThumbnails: Record<number, string> = {};
-      try {
-        const images = sheet.getImages ? sheet.getImages() : [];
-        for (const img of images) {
-          let rowNum = 0;
-          if (img.range && img.range.tl) {
-            if (typeof img.range.tl.nativeRow === "number") {
-              rowNum = img.range.tl.nativeRow + 1;
-            } else if (typeof img.range.tl.row === "number") {
-              rowNum = img.range.tl.row;
-            }
-          }
-          const media = workbook.model?.media?.[img.imageId] || (workbook.model?.media || []).find(
-            (m: any) => m.index === img.imageId || String(m.index) === String(img.imageId)
-          );
-          if (media && media.buffer && rowNum > 0) {
-            const blob = new Blob([media.buffer], { type: `image/${media.extension || "jpeg"}` });
-            imgThumbnails[rowNum] = URL.createObjectURL(blob);
-          }
-        }
-      } catch (e) {
-        console.warn("Could not load preview thumbnails:", e);
-      }
-
-      // Collect headers from row 1 and row 2 (supports multi-row headers)
-      const r1 = (sheet.getRow(1).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
-      let colNames = [...r1];
-      if (r1.length < 3 && sheet.rowCount >= 2) {
-        const r2 = (sheet.getRow(2).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
-        colNames = Array.from(new Set([...r1, ...r2]));
-      }
-      setHeaders(colNames);
-
-      // Extract sample data rows (up to 30 rows for live preview)
-      const dataRows: Array<Record<string, any>> = [];
-      const startRow = sheet.rowCount >= 3 && !sheet.getRow(2).getCell(1).value ? 3 : 2;
-      sheet.eachRow((row, rowNumber) => {
-        if (rowNumber >= startRow && dataRows.length < 30) {
-          const rowObj: Record<string, any> = {};
-          colNames.forEach((hdr) => {
-            let cIndex = -1;
-            const r1Vals = sheet.getRow(1).values as Array<unknown>;
-            const r2Vals = sheet.getRow(2).values as Array<unknown>;
-            if (r1Vals) {
-              const idx = r1Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === hdr.toLowerCase());
-              if (idx > 0) cIndex = idx;
-            }
-            if (cIndex === -1 && r2Vals) {
-              const idx = r2Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === hdr.toLowerCase());
-              if (idx > 0) cIndex = idx;
-            }
-            if (cIndex > 0) {
-              const val = row.getCell(cIndex).value;
-              rowObj[hdr] = val !== null && val !== undefined ? String(val).trim() : "";
-            }
-          });
-          if (Object.values(rowObj).some(Boolean)) {
-            rowObj["__thumbnail"] = imgThumbnails[rowNumber] || "";
-            dataRows.push(rowObj);
-          }
-        }
-      });
-      setSampleRows(dataRows);
-
-      // Intelligent Auto-Mapping
-      const findCol = (...needles: string[]) =>
-        colNames.find(h => needles.some(n => h.toLowerCase() === n.toLowerCase() || h.toLowerCase().includes(n.toLowerCase()))) ?? "";
-
-      const autoMapped: Mapping = {
-        code: findCol("buyer code", "buyer code / sku", "sku", "item code", "product code", "code"),
-        description: findCol("product description", "description", "product name", "product", "item name", "desc"),
-        dim_cm: findCol("product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)"),
-        dim_in: findCol("carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)"),
-        price: findCol("price (usd)", "price", "mrp", "rate", "cost", "qyt"),
-        length: findCol("length", " l", "len"),
-        width: findCol("width", "breadth", " w", "wid"),
-        height: findCol("height", " h", "hgt"),
-        image: findCol("product image (embedded)", "product image", "image", "photo", "picture", "img")
-      };
-      setMapping(autoMapped);
-      const embeddedCount = Object.keys(imgThumbnails).length;
-      setStatus(`Loaded ${colNames.length} columns and ${dataRows.length} product rows from Excel (${embeddedCount} embedded photos detected).`);
+      setWorkbookRef(workbook);
+      const sheetNames = workbook.worksheets.map(w => w.name);
+      setAvailableSheets(sheetNames);
+      const sheet = workbook.worksheets[0];
+      setSelectedSheetName(sheet.name);
+      loadWorksheetData(workbook, sheet);
     } catch {
       setStatus("Could not read this workbook. Please upload a valid .xlsx file.");
     }
@@ -711,6 +788,8 @@ export default function ExcelToPptTool() {
         fontColor,
         background,
         logoFile,
+        ratio,
+        sheetName: selectedSheetName,
         onProgress: (phase, percent, detail) => {
           setProgress({ active: true, phase, percent, message: detail });
           setStatus(detail);
@@ -752,7 +831,11 @@ export default function ExcelToPptTool() {
         }
       );
       if (!delivery.success) {
-        setStatus(`Save/Download blocked: ${delivery.error || "Pre-download validation failed."}`);
+        if (delivery.error?.includes("cancelled")) {
+          setStatus("File save was cancelled by the user.");
+        } else {
+          setStatus(`Save/Download blocked: ${delivery.error || "Pre-download validation failed."}`);
+        }
       } else {
         setStatus(delivery.savedPath ? `Saved to: ${delivery.savedPath}` : "Presentation downloaded successfully.");
       }
@@ -771,7 +854,8 @@ export default function ExcelToPptTool() {
 
   const handleShowDesktopFolder = async () => {
     if (!lastResult?.delivery?.savedPath) return;
-    await revealPresentationInFolder(lastResult.delivery.savedPath);
+    const ok = await revealPresentationInFolder(lastResult.delivery.savedPath);
+    setStatus(ok ? `Revealed in folder: ${lastResult.delivery.savedPath}` : "Could not reveal file in File Explorer.");
   };
 
   return (
@@ -870,9 +954,16 @@ export default function ExcelToPptTool() {
             </div>
           </div>
           {file && (
-            <span className="ep-badge ep-badge-success">
-              <CheckCircle2 size={13} /> {headers.length} Columns · {sampleRows.length}+ Rows
-            </span>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+              <span className="ep-badge ep-badge-success">
+                <CheckCircle2 size={13} /> {headers.length} Columns · {sampleRows.length}+ Rows
+              </span>
+              {missingImageCount > 0 && (
+                <span className="ep-badge ep-badge-warning" style={{ backgroundColor: "#fef3c7", color: "#92400e", border: "1px solid #fde68a" }}>
+                  <AlertCircle size={13} /> {missingImageCount} Missing Images
+                </span>
+              )}
+            </div>
           )}
         </div>
         <label className="ep-drop">
@@ -885,6 +976,38 @@ export default function ExcelToPptTool() {
           <strong>{file ? file.name : "Click or drag an Excel workbook (.xlsx)"}</strong>
           <small>{file ? `${(file.size / 1024).toFixed(0)} KB · Ready to map` : "Supports multi-row headers and embedded cell photos"}</small>
         </label>
+
+        {availableSheets.length > 1 && (
+          <div className="ep-sheet-selector-bar" style={{
+            marginTop: "0.85rem",
+            padding: "0.65rem 1rem",
+            background: "#f8fafc",
+            border: "1px solid #e2e8f0",
+            borderRadius: "6px",
+            display: "flex",
+            alignItems: "center",
+            gap: "10px"
+          }}>
+            <Layers size={16} style={{ color: "#3b82f6" }} />
+            <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "#1e293b" }}>Active Worksheet:</span>
+            <select
+              value={selectedSheetName}
+              onChange={e => handleSheetChange(e.target.value)}
+              style={{
+                padding: "4px 10px",
+                borderRadius: "4px",
+                border: "1px solid #cbd5e1",
+                fontSize: "0.85rem",
+                color: "#0f172a",
+                background: "#ffffff"
+              }}
+            >
+              {availableSheets.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="ep-template-download-banner" style={{
           marginTop: "1rem",
@@ -1435,11 +1558,12 @@ export default function ExcelToPptTool() {
                       max="800"
                       value={imgWidth}
                       onChange={e => {
-                        const w = Math.max(30, Number(e.target.value) || 30);
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, img: [s.img[0], s.img[1], s.img[0] + w, s.img[3]] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const w = Math.max(30, Math.min(800 - s.img[0], Number(e.target.value) || 30));
+                            return { ...s, img: [s.img[0], s.img[1], s.img[0] + w, s.img[3]] };
+                          })
                         );
                       }}
                     />
@@ -1452,11 +1576,12 @@ export default function ExcelToPptTool() {
                       max="450"
                       value={imgHeight}
                       onChange={e => {
-                        const h = Math.max(30, Number(e.target.value) || 30);
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, img: [s.img[0], s.img[1], s.img[2], s.img[1] + h] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const h = Math.max(30, Math.min(450 - s.img[1], Number(e.target.value) || 30));
+                            return { ...s, img: [s.img[0], s.img[1], s.img[2], s.img[1] + h] };
+                          })
                         );
                       }}
                     />
@@ -1469,12 +1594,13 @@ export default function ExcelToPptTool() {
                       max="800"
                       value={slot.img[0]}
                       onChange={e => {
-                        const left = Number(e.target.value) || 0;
-                        const iw = slot.img[2] - slot.img[0];
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, img: [left, s.img[1], left + iw, s.img[3]] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const iw = s.img[2] - s.img[0];
+                            const left = Math.max(0, Math.min(800 - iw, Number(e.target.value) || 0));
+                            return { ...s, img: [left, s.img[1], left + iw, s.img[3]] };
+                          })
                         );
                       }}
                     />
@@ -1487,12 +1613,13 @@ export default function ExcelToPptTool() {
                       max="450"
                       value={slot.img[1]}
                       onChange={e => {
-                        const top = Number(e.target.value) || 0;
-                        const ih = slot.img[3] - slot.img[1];
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, img: [s.img[0], top, s.img[2], top + ih] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const ih = s.img[3] - s.img[1];
+                            const top = Math.max(0, Math.min(450 - ih, Number(e.target.value) || 0));
+                            return { ...s, img: [s.img[0], top, s.img[2], top + ih] };
+                          })
                         );
                       }}
                     />
@@ -1509,11 +1636,12 @@ export default function ExcelToPptTool() {
                       max="800"
                       value={textWidth}
                       onChange={e => {
-                        const w = Math.max(30, Number(e.target.value) || 30);
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, text: [s.text[0], s.text[1], s.text[0] + w, s.text[3]] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const w = Math.max(30, Math.min(800 - s.text[0], Number(e.target.value) || 30));
+                            return { ...s, text: [s.text[0], s.text[1], s.text[0] + w, s.text[3]] };
+                          })
                         );
                       }}
                     />
@@ -1526,11 +1654,12 @@ export default function ExcelToPptTool() {
                       max="450"
                       value={textHeight}
                       onChange={e => {
-                        const h = Math.max(30, Number(e.target.value) || 30);
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, text: [s.text[0], s.text[1], s.text[2], s.text[1] + h] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const h = Math.max(30, Math.min(450 - s.text[1], Number(e.target.value) || 30));
+                            return { ...s, text: [s.text[0], s.text[1], s.text[2], s.text[1] + h] };
+                          })
                         );
                       }}
                     />
@@ -1543,12 +1672,13 @@ export default function ExcelToPptTool() {
                       max="800"
                       value={slot.text[0]}
                       onChange={e => {
-                        const left = Number(e.target.value) || 0;
-                        const tw = slot.text[2] - slot.text[0];
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, text: [left, s.text[1], left + tw, s.text[3]] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const tw = s.text[2] - s.text[0];
+                            const left = Math.max(0, Math.min(800 - tw, Number(e.target.value) || 0));
+                            return { ...s, text: [left, s.text[1], left + tw, s.text[3]] };
+                          })
                         );
                       }}
                     />
@@ -1561,12 +1691,13 @@ export default function ExcelToPptTool() {
                       max="450"
                       value={slot.text[1]}
                       onChange={e => {
-                        const top = Number(e.target.value) || 0;
-                        const th = slot.text[3] - slot.text[1];
                         setLayout(prev =>
-                          prev.map((s, idx) =>
-                            idx === i ? { ...s, text: [s.text[0], top, s.text[2], top + th] } : s
-                          )
+                          prev.map((s, idx) => {
+                            if (idx !== i) return s;
+                            const th = s.text[3] - s.text[1];
+                            const top = Math.max(0, Math.min(450 - th, Number(e.target.value) || 0));
+                            return { ...s, text: [s.text[0], top, s.text[2], top + th] };
+                          })
                         );
                       }}
                     />
@@ -1633,15 +1764,28 @@ export default function ExcelToPptTool() {
               <input type="checkbox" checked={autoCenter} onChange={e => setAutoCenter(e.target.checked)} /> Auto-center images over text
             </label>
           </div>
-          <label className="ep-logo-upload">
-            <Upload size={16} />
-            <span>{logoFile ? logoFile.name : "Upload brand logo (PNG, JPG or SVG)"}</span>
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              onChange={e => setLogoFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <label className="ep-logo-upload" style={{ flex: 1 }}>
+              <Upload size={16} />
+              <span>{logoFile ? logoFile.name : "Upload brand logo (PNG, JPG or SVG)"}</span>
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={e => setLogoFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            {logoFile && (
+              <button
+                type="button"
+                className="ep-btn-subtle ep-btn-danger"
+                style={{ padding: "8px 12px", display: "inline-flex", alignItems: "center", gap: "4px" }}
+                title="Remove uploaded logo"
+                onClick={() => setLogoFile(null)}
+              >
+                <Trash2 size={15} /> Remove
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Typography & Color Styling Grid */}
@@ -1707,27 +1851,35 @@ export default function ExcelToPptTool() {
           <div
             className="ep-live-slide-canvas"
             style={{
-              aspectRatio: useCustomTemplate ? "16 / 9" : String(ratioValue),
+              aspectRatio: useCustomTemplate && templateInfo ? (templateInfo.aspect_ratio === "4:3" ? "4 / 3" : templateInfo.aspect_ratio === "16:9" ? "16 / 9" : String(ratioValue)) : String(ratioValue),
               backgroundColor: useCustomTemplate ? "#ffffff" : `#${background.replace("#", "")}`
             }}
           >
             {useCustomTemplate ? (
               <>
-                <div className="ep-preview-top-brand">
-                  <div className="ep-preview-noble-brand">NOBLE SELECTIONS</div>
-                  <div className="ep-preview-vector-logo">
-                    <span className="logo-icon">NS</span>
-                    <span className="logo-sub">EST. 1988</span>
+                {showHeader && (
+                  <div className="ep-preview-top-brand" style={{ color: `#${fontColor.replace("#", "")}` }}>
+                    <div className="ep-preview-noble-brand" style={{ fontFamily: fontName }}>
+                      {headerText || "NOBLE SELECTIONS"}
+                    </div>
+                    {logoUrl ? (
+                      <img src={logoUrl} alt="Logo" style={{ maxHeight: "32px", maxWidth: "120px", objectFit: "contain" }} />
+                    ) : (
+                      <div className="ep-preview-vector-logo">
+                        <span className="logo-icon">NS</span>
+                        <span className="logo-sub">EST. 1988</span>
+                      </div>
+                    )}
                   </div>
-                </div>
-                <div className="ep-preview-template-rule" />
+                )}
+                {showRule && <div className="ep-preview-template-rule" />}
               </>
             ) : (
               <>
                 {showHeader && (
-                  <div className="ep-preview-header" style={{ color: `#${fontColor.replace("#", "")}` }}>
-                    {headerText || "Your heading"}
-                    {logoFile && <span className="ep-preview-logo">{logoFile.name.slice(0, 18)}</span>}
+                  <div className="ep-preview-header" style={{ fontFamily: fontName, color: `#${fontColor.replace("#", "")}` }}>
+                    <span>{headerText || "PRODUCT COLLECTION"}</span>
+                    {logoUrl && <img src={logoUrl} alt="Logo" style={{ maxHeight: "28px", maxWidth: "100px", objectFit: "contain" }} />}
                   </div>
                 )}
                 {showRule && <div className="ep-preview-rule" />}
@@ -1786,12 +1938,12 @@ export default function ExcelToPptTool() {
                       )}
                     </div>
 
-                    <div className="ep-slot-info-box">
-                      <div className="ep-info-line-1">
+                    <div className="ep-slot-info-box" style={{ fontFamily: fontName, color: `#${fontColor.replace("#", "")}` }}>
+                      <div className="ep-info-line-1" style={{ fontSize: `${Math.round(fontSize * 1.05)}px` }}>
                         <b>{skuVal}</b> | <span>{descVal}</span>
                       </div>
                       {(cmVal || inVal) && (
-                        <div className="ep-info-line-2">
+                        <div className="ep-info-line-2" style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px` }}>
                           {[cmVal, inVal].filter(Boolean).map((d, i) => (
                             <React.Fragment key={i}>
                               {i > 0 && <span> | </span>}
@@ -1800,7 +1952,7 @@ export default function ExcelToPptTool() {
                           ))}
                         </div>
                       )}
-                      {priceVal && <div className="ep-info-line-3">{priceVal}</div>}
+                      {priceVal && <div className="ep-info-line-3" style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px` }}>{priceVal}</div>}
                     </div>
                   </div>
                 );

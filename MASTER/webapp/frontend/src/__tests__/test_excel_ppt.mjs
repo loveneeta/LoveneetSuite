@@ -21,6 +21,8 @@ import {
 import { validatePptx, computeSha256 } from '../services/pptxValidator.ts';
 import { generateCataloguePptx } from '../services/pptxGenerator.ts';
 import { deliverPresentation } from '../services/fileDelivery.ts';
+import { isDesktop } from '../services/platform.ts';
+import { parseXmlDocument, serializeXmlDocument } from '../services/xmlHelper.ts';
 import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1144,6 +1146,345 @@ describe('Excel to Catalogue PPT Automated Tests', () => {
       if (com.status === 'VERIFIED') {
         assert.equal(com.slideCount, 1);
       }
+    });
+  });
+
+
+  describe('Phase 8: Comprehensive Button & Workflow Interaction Scenarios', () => {
+    const standardMapping = {
+      code: 'Buyer Code / SKU',
+      description: 'Product Description',
+      dim_cm: 'Product Dimension (CM)',
+      dim_in: 'Carton Dimension (Inch)',
+      price: 'Price (USD)',
+      length: '',
+      width: '',
+      height: '',
+      image: 'Product Image (Embedded)'
+    };
+    it('Scenario 1: Upload Excel -> Map columns -> Generate PPTX', async () => {
+      const excelBuf = await createTestExcel(4, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      const val = await validatePptx(out.blob, { slideCount: 2, hasImages: true });
+      assert.equal(val.valid, true);
+      assert.equal(out.slideCount, 2);
+    });
+
+    it('Scenario 2: Upload Excel -> Upload custom template -> Generate PPTX', async () => {
+      const excelBuf = await createTestExcel(3, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        headerText: 'Custom Company Catalogue',
+        fontSize: 16
+      });
+      const val = await validatePptx(out.blob, { slideCount: 1, hasImages: true });
+      assert.equal(val.valid, true);
+      const zip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      const s1 = await zip.file('ppt/slides/slide1.xml').async('text');
+      assert.ok(s1.includes('Custom Company Catalogue'));
+    });
+
+    it('Scenario 3: Change mapping -> Preview -> Generate', async () => {
+      const excelBuf = await createTestExcel(2, false);
+      const customMapping = {
+        code: 'Buyer Code / SKU',
+        description: 'Product Description',
+        dim_cm: '',
+        dim_in: '',
+        price: 'Price (USD)',
+        length: '',
+        width: '',
+        height: '',
+        image: ''
+      };
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, customMapping);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+      const zip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      const s1 = await zip.file('ppt/slides/slide1.xml').async('text');
+      assert.ok(s1.includes('SKU-1001'));
+      assert.ok(s1.includes('PRICE : $130.00'));
+    });
+
+    it('Scenario 4: Change layout -> Preview -> Generate', async () => {
+      const customLayout = [
+        { img: [50, 50, 350, 250], text: [50, 260, 350, 400] },
+        { img: [400, 50, 700, 250], text: [400, 260, 700, 400] }
+      ];
+      const excelBuf = await createTestExcel(2, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        customLayout
+      });
+      assert.equal(out.slideCount, 1);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 5: Save profile -> Reload application -> Load profile', async () => {
+      const profile = {
+        name: 'Furniture 2026',
+        mapping: { ...standardMapping },
+        imageFit: 'cover',
+        selectedSlideIndex: 0,
+        count: 2,
+        layout: DEFAULT_LAYOUT,
+        fontSize: 16,
+        fontName: 'Manrope',
+        fontColor: '1E293B',
+        background: 'F8FAFC',
+        ratio: '16:9',
+        autoCenter: true,
+        showHeader: true,
+        showRule: true,
+        headerText: 'FURNITURE 2026'
+      };
+      const profiles = [profile];
+      const serialized = JSON.stringify(profiles);
+      const restored = JSON.parse(serialized);
+      assert.equal(restored.length, 1);
+      assert.equal(restored[0].name, 'Furniture 2026');
+      assert.equal(restored[0].fontSize, 16);
+      assert.equal(restored[0].fontName, 'Manrope');
+      assert.equal(restored[0].fontColor, '1E293B');
+      assert.equal(restored[0].headerText, 'FURNITURE 2026');
+    });
+
+    it('Scenario 6: Generate 1 product', async () => {
+      const excelBuf = await createTestExcel(1, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      assert.equal(out.slideCount, 1);
+      assert.equal(out.totalProducts, 1);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 7: Generate 2 products', async () => {
+      const excelBuf = await createTestExcel(2, true);
+      const out2 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, { customLayout: DEFAULT_LAYOUT });
+      assert.equal(out2.slideCount, 1);
+      const out3 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, { customLayout: THREE_LAYOUT });
+      assert.equal(out3.slideCount, 1);
+    });
+
+    it('Scenario 8: Generate 3 products', async () => {
+      const excelBuf = await createTestExcel(3, true);
+      const out2 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, { customLayout: DEFAULT_LAYOUT });
+      assert.equal(out2.slideCount, 2);
+      const out3 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, { customLayout: THREE_LAYOUT });
+      assert.equal(out3.slideCount, 1);
+    });
+
+    it('Scenario 9: Generate 100 products', async () => {
+      const excelBuf = await createTestExcel(100, false);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, { customLayout: DEFAULT_LAYOUT });
+      assert.equal(out.slideCount, 50);
+      assert.equal(out.totalProducts, 100);
+      const val = await validatePptx(out.blob, { slideCount: 50 });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 10: Generate products with missing images', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Products');
+      ws.addRow(['Buyer Code / SKU', 'Product Description', 'Price (USD)']);
+      ws.addRow(['NO-IMG-01', 'First product without image', '$10']);
+      ws.addRow(['NO-IMG-02', 'Second product without image', '$20']);
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      assert.equal(out.slideCount, 1);
+      assert.equal(out.totalProducts, 2);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 11: Generate products with long descriptions', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Products');
+      ws.addRow(['Buyer Code / SKU', 'Product Description', 'Price (USD)']);
+      const longDesc = 'A'.repeat(500) + ' & special XML symbols < > " \' & accented characters éèà';
+      ws.addRow(['LONG-01', longDesc, '$99.99']);
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 12: Cancel desktop save', async () => {
+      const excelBuf = await createTestExcel(1, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      const origWindow = global.window;
+      global.window = {
+        electronAPI: {
+          isElectron: true,
+          dialog: {
+            showSaveDialog: async () => ({ canceled: true })
+          }
+        }
+      };
+      const delivery = await deliverPresentation(out.blob, 'test_cancel.pptx', true);
+      global.window = origWindow;
+      assert.equal(delivery.success, false);
+      assert.ok(delivery.error.includes('cancelled'));
+    });
+
+    it('Scenario 13: Attempt browser download', async () => {
+      const excelBuf = await createTestExcel(1, true);
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      const origWindow = global.window;
+      global.window = { electronAPI: undefined };
+      const delivery = await deliverPresentation(out.blob, 'test_web.pptx', false);
+      global.window = origWindow;
+      assert.equal(delivery.success, true);
+      assert.equal(delivery.platform, 'web');
+    });
+
+    it('Scenario 14: Switch between desktop and web environments', async () => {
+      assert.equal(isDesktop(), false);
+      global.window = { electronAPI: { isElectron: true } };
+      assert.equal(isDesktop(), true);
+      delete global.window;
+      assert.equal(isDesktop(), false);
+    });
+
+    it('Scenario 15: Formula cell values extracted cleanly without [object Object]', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Products');
+      ws.addRow(['Buyer Code / SKU', 'Product Description', 'Price (USD)']);
+      const r = ws.addRow(['SKU-FORMULA', '']);
+      r.getCell(2).value = { formula: 'CONCAT("Formulated ", "Desc")', result: 'Formulated Table Description' };
+      r.getCell(3).value = '$120.00';
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping);
+      const val = await validatePptx(out.blob, { slideCount: 1 });
+      assert.equal(val.valid, true);
+      const zip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      const sXml = await zip.file('ppt/slides/slide1.xml').async('text');
+      assert.ok(sXml.includes('Formulated Table Description'));
+      assert.ok(!sXml.includes('[object Object]'), 'Output XML must NEVER contain [object Object]');
+    });
+
+    it('Scenario 16: Multi-worksheet workbook selection', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws1 = wb.addWorksheet('Instructions');
+      ws1.addRow(['Note', 'Do not use this sheet']);
+      const ws2 = wb.addWorksheet('Active Products');
+      ws2.addRow(['Buyer Code / SKU', 'Product Description', 'Price (USD)']);
+      ws2.addRow(['SHEET2-SKU1', 'Sheet 2 Item 1', '$50']);
+      ws2.addRow(['SHEET2-SKU2', 'Sheet 2 Item 2', '$60']);
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        sheetName: 'Active Products'
+      });
+      assert.equal(out.slideCount, 1);
+      assert.equal(out.totalProducts, 2);
+      const zip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      const sXml = await zip.file('ppt/slides/slide1.xml').async('text');
+      assert.ok(sXml.includes('SHEET2-SKU1'));
+      assert.ok(sXml.includes('SHEET2-SKU2'));
+    });
+
+    it('Scenario 17: Slide ratio switching updates sldSz in OpenXML', async () => {
+      const excelBuf = await createTestExcel(1, false);
+      const out43 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        ratio: '4:3'
+      });
+      const zip43 = await JSZip.loadAsync(await bufferFromBlob(out43.blob));
+      const presXml43 = await zip43.file('ppt/presentation.xml').async('text');
+      assert.ok(presXml43.includes('cx="9144000"'));
+      assert.ok(presXml43.includes('cy="6858000"'));
+
+      const outA4 = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        ratio: 'A4 Landscape'
+      });
+      const zipA4 = await JSZip.loadAsync(await bufferFromBlob(outA4.blob));
+      const presXmlA4 = await zipA4.file('ppt/presentation.xml').async('text');
+      assert.ok(presXmlA4.includes('cx="10692000"'));
+      assert.ok(presXmlA4.includes('cy="7560000"'));
+    });
+
+    it('Scenario 18: Brand logo embedding embeds into media and slide XML', async () => {
+      const excelBuf = await createTestExcel(1, true);
+      const logoBuffer = Buffer.from(SAMPLE_PNG_B64, 'base64');
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        logoFile: logoBuffer
+      });
+      const zip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      assert.ok(zip.file('ppt/media/brand_logo.png'), 'Brand logo must be stored in ppt/media');
+      const sXml = await zip.file('ppt/slides/slide1.xml').async('text');
+      assert.ok(sXml.includes('Brand Logo'), 'Slide XML must contain Brand Logo picture shape');
+    });
+
+    it('Scenario 19: Contain vs Cover image fitting', async () => {
+      const excelBuf = await createTestExcel(1, true);
+      const outCover = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        imageFit: 'cover'
+      });
+      const valCover = await validatePptx(outCover.blob, { slideCount: 1, hasImages: true });
+      assert.equal(valCover.valid, true);
+
+      const outContain = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, standardMapping, {
+        imageFit: 'contain'
+      });
+      const valContain = await validatePptx(outContain.blob, { slideCount: 1, hasImages: true });
+      assert.equal(valContain.valid, true);
+    });
+
+    it('Scenario 20: Template with cover and closing slides preserves all slides', async () => {
+      const zip = await JSZip.loadAsync(DEFAULT_TMPL_BUF);
+      const s1Xml = await zip.file('ppt/slides/slide1.xml').async('text');
+      const s1Rels = await zip.file('ppt/slides/_rels/slide1.xml.rels').async('text');
+      
+      const coverXml = s1Xml.replace(/<a:t>.*?<\/a:t>/g, '<a:t>COVER SLIDE 2026</a:t>');
+      zip.file('ppt/slides/slide1.xml', coverXml);
+      zip.file('ppt/slides/slide2.xml', s1Xml);
+      zip.file('ppt/slides/_rels/slide2.xml.rels', s1Rels);
+
+      const closingXml = s1Xml.replace(/<a:t>.*?<\/a:t>/g, '<a:t>THANK YOU / CLOSING SLIDE</a:t>');
+      zip.file('ppt/slides/slide3.xml', closingXml);
+      zip.file('ppt/slides/_rels/slide3.xml.rels', s1Rels);
+
+      const presDoc = parseXmlDocument(await zip.file('ppt/presentation.xml').async('text'));
+      const presRelsDoc = parseXmlDocument(await zip.file('ppt/_rels/presentation.xml.rels').async('text'));
+      const sldIdLst = presDoc.getElementsByTagName('p:sldIdLst')[0];
+      
+      const s2 = presDoc.createElementNS('http://schemas.openxmlformats.org/presentationml/2006/main', 'p:sldId');
+      s2.setAttribute('id', '257');
+      s2.setAttribute('r:id', 'rIdSlide2');
+      sldIdLst.appendChild(s2);
+
+      const s3 = presDoc.createElementNS('http://schemas.openxmlformats.org/presentationml/2006/main', 'p:sldId');
+      s3.setAttribute('id', '258');
+      s3.setAttribute('r:id', 'rIdSlide3');
+      sldIdLst.appendChild(s3);
+
+      const r2 = presRelsDoc.createElementNS('http://schemas.openxmlformats.org/package/2006/relationships', 'Relationship');
+      r2.setAttribute('Id', 'rIdSlide2');
+      r2.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide');
+      r2.setAttribute('Target', 'slides/slide2.xml');
+      presRelsDoc.documentElement.appendChild(r2);
+
+      const r3 = presRelsDoc.createElementNS('http://schemas.openxmlformats.org/package/2006/relationships', 'Relationship');
+      r3.setAttribute('Id', 'rIdSlide3');
+      r3.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide');
+      r3.setAttribute('Target', 'slides/slide3.xml');
+      presRelsDoc.documentElement.appendChild(r3);
+
+      zip.file('ppt/presentation.xml', serializeXmlDocument(presDoc));
+      zip.file('ppt/_rels/presentation.xml.rels', serializeXmlDocument(presRelsDoc));
+
+      const tmplBuf = await zip.generateAsync({ type: 'arraybuffer' });
+
+      const excelBuf = await createTestExcel(4, false);
+      const out = await generateCataloguePptx(excelBuf, tmplBuf, standardMapping, {
+        selectedSlideIndex: 1,
+        customLayout: DEFAULT_LAYOUT
+      });
+
+      assert.equal(out.slideCount, 4);
+      const outZip = await JSZip.loadAsync(await bufferFromBlob(out.blob));
+      const s1Out = await outZip.file('ppt/slides/slide1.xml').async('text');
+      const s4Out = await outZip.file('ppt/slides/slide4.xml').async('text');
+      assert.ok(s1Out.includes('COVER SLIDE 2026'), 'Cover slide must be preserved at slide 1');
+      assert.ok(s4Out.includes('THANK YOU / CLOSING SLIDE'), 'Closing slide must be preserved at slide 4');
     });
   });
 
