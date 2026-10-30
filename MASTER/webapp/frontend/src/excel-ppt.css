@@ -356,6 +356,99 @@
   color: #e5edff;
 }
 
+.ep-studio-toolbar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 14px;
+}
+.ep-count-selector, .ep-fit-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 140px;
+}
+.ep-count-selector span, .ep-fit-selector span {
+  font-size: 10px;
+  color: #aab6cf;
+  font-weight: 700;
+}
+.ep-btn-group {
+  display: inline-flex;
+  border: 1px solid #303b53;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.ep-btn-group button {
+  padding: 8px 12px;
+  font-size: 11px;
+  background: #0d1422;
+  color: #aab6cf;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.ep-btn-group button.selected {
+  background: #172541;
+  color: #9cb1ff;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px #6684e7;
+}
+
+.ep-live-product-image-box {
+  border: 1.5px solid transparent;
+  border-radius: 6px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
+  touch-action: none;
+}
+.ep-live-product-image-box:hover,
+.ep-live-product-image-box.is-selected {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4) !important;
+}
+.ep-live-product-text-box {
+  border: 1.5px dashed transparent;
+  border-radius: 6px;
+  padding: 4px 6px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  user-select: none;
+  touch-action: none;
+}
+.ep-live-product-text-box:hover,
+.ep-live-product-text-box.is-selected {
+  border-color: #f59e0b !important;
+  background: rgba(245, 158, 11, 0.08) !important;
+}
+.ep-live-size-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(15, 23, 42, 0.85);
+  color: #93c5fd;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 6;
+}
+.ep-live-product-image-box:hover .ep-live-size-badge,
+.ep-live-product-image-box.is-selected .ep-live-size-badge {
+  opacity: 1;
+}
+.ep-resize-handle-amber {
+  background: linear-gradient(135deg, transparent 45%, #f59e0b 45%) !important;
+}
+.ep-resize-handle-amber:hover {
+  background: linear-gradient(135deg, transparent 35%, #fbbf24 35%) !important;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.8) !important;
+}
+
 .ep-live-slide-wrapper {
   background: #050811;
   border: 1px solid #25334f;
