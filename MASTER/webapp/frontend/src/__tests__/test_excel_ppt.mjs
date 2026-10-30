@@ -1486,6 +1486,90 @@ describe('Excel to Catalogue PPT Automated Tests', () => {
       assert.ok(s1Out.includes('COVER SLIDE 2026'), 'Cover slide must be preserved at slide 1');
       assert.ok(s4Out.includes('THANK YOU / CLOSING SLIDE'), 'Closing slide must be preserved at slide 4');
     });
+
+    it('Scenario 21: Regression — 30 products with empty SKU column generate successfully without blocking', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Products');
+      ws.columns = [
+        { header: 'Buyer Code / SKU', key: 'code', width: 20 },
+        { header: 'Product Description', key: 'desc', width: 40 },
+        { header: 'Product Dimension (CM)', key: 'dim_cm', width: 25 },
+        { header: 'Price (USD)', key: 'price', width: 15 },
+      ];
+
+      for (let i = 1; i <= 30; i++) {
+        ws.addRow({
+          code: '', // Completely empty SKU column
+          desc: `Export Product Item #${i}`,
+          dim_cm: `120 x 80 x 75 CM`,
+          price: `$${50 + i}.00`
+        });
+      }
+
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, {
+        code: 'Buyer Code / SKU',
+        description: 'Product Description',
+        dim_cm: 'Product Dimension (CM)',
+        dim_in: '',
+        price: 'Price (USD)',
+        length: '',
+        width: '',
+        height: '',
+        image: ''
+      }, {
+        customLayout: THREE_LAYOUT
+      });
+
+      assert.equal(out.totalProducts, 30);
+      assert.equal(out.slideCount, 10);
+      const val = await validatePptx(out.blob, { slideCount: 10, hasImages: false });
+      assert.equal(val.valid, true);
+    });
+
+    it('Scenario 22: Regression — Short column headers (C, D, L, W, NO) do not falsely hijack SKU/Code mapping', async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Products');
+      ws.columns = [
+        { header: 'NO', key: 'no', width: 10 },
+        { header: 'C', key: 'c', width: 10 },
+        { header: 'Product Description', key: 'desc', width: 40 },
+        { header: 'D', key: 'd', width: 10 },
+        { header: 'SKU', key: 'sku', width: 20 },
+        { header: 'Price (USD)', key: 'price', width: 15 },
+      ];
+
+      for (let i = 1; i <= 6; i++) {
+        ws.addRow({
+          no: i,
+          c: '', // Empty C column
+          desc: `Handcrafted Table Model #${i}`,
+          d: '', // Empty D column
+          sku: `ART-2026-${i}`,
+          price: `$${100 * i}`
+        });
+      }
+
+      const excelBuf = await wb.xlsx.writeBuffer();
+      const out = await generateCataloguePptx(excelBuf, DEFAULT_TMPL_BUF, {
+        code: 'SKU',
+        description: 'Product Description',
+        dim_cm: '',
+        dim_in: '',
+        price: 'Price (USD)',
+        length: '',
+        width: '',
+        height: '',
+        image: ''
+      }, {
+        customLayout: THREE_LAYOUT
+      });
+
+      assert.equal(out.totalProducts, 6);
+      assert.equal(out.slideCount, 2);
+      const val = await validatePptx(out.blob, { slideCount: 2, hasImages: false });
+      assert.equal(val.valid, true);
+    });
   });
 
 });

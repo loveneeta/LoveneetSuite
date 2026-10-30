@@ -465,7 +465,36 @@ export default function ExcelToPptTool() {
       console.warn("Could not load preview thumbnails:", e);
     }
 
-    // Collect headers from row 1 and row 2 with duplicate disambiguation
+    // Collect headers: scan rows 1 through 5 to find the best header row
+    let bestHeaderRow = 1;
+    let maxHeaderScore = -1;
+    const recognizedTerms = [
+      "code", "sku", "item", "product", "desc", "description", "cm", "inch",
+      "dim", "size", "price", "image", "photo", "mrp", "rate", "cost", "buyer",
+      "model", "style", "art", "ref", "name", "picture"
+    ];
+
+    for (let r = 1; r <= Math.min(5, sheet.rowCount); r++) {
+      const row = sheet.getRow(r);
+      let matchScore = 0;
+      let count = 0;
+      row.eachCell((cell) => {
+        const v = extractCellValue(cell).toLowerCase().trim();
+        if (v) {
+          count++;
+          if (recognizedTerms.some(term => v.includes(term))) {
+            matchScore += 4;
+          } else {
+            matchScore += 1;
+          }
+        }
+      });
+      if (matchScore > maxHeaderScore && count >= 1) {
+        maxHeaderScore = matchScore;
+        bestHeaderRow = r;
+      }
+    }
+
     const counts: Record<string, number> = {};
     const disambiguate = (name: string): string => {
       const trimmed = name.trim();
@@ -474,33 +503,58 @@ export default function ExcelToPptTool() {
       return counts[trimmed] > 1 ? `${trimmed} (${counts[trimmed]})` : trimmed;
     };
 
-    const r1Raw = (sheet.getRow(1).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
-    let colNames = r1Raw.map(disambiguate);
-    if (colNames.length < 3 && sheet.rowCount >= 2) {
-      const r2Raw = (sheet.getRow(2).values as Array<unknown> || []).slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
-      const r2Unique = r2Raw.filter(h => !colNames.some(c => c.toLowerCase() === h.toLowerCase()));
-      colNames = [...colNames, ...r2Unique.map(disambiguate)];
+    const headerCells: string[] = [];
+    sheet.getRow(bestHeaderRow).eachCell((cell) => {
+      const v = extractCellValue(cell);
+      if (v) headerCells.push(v);
+    });
+
+    let colNames = headerCells.map(disambiguate);
+    if (bestHeaderRow > 1) {
+      sheet.getRow(bestHeaderRow - 1).eachCell((cell) => {
+        const v = extractCellValue(cell);
+        if (v && !colNames.some(c => c.toLowerCase() === v.toLowerCase())) {
+          colNames.push(disambiguate(v));
+        }
+      });
+    }
+    if (bestHeaderRow + 1 <= sheet.rowCount) {
+      sheet.getRow(bestHeaderRow + 1).eachCell((cell) => {
+        const v = extractCellValue(cell);
+        if (v && !colNames.some(c => c.toLowerCase() === v.toLowerCase())) {
+          colNames.push(disambiguate(v));
+        }
+      });
     }
     setHeaders(colNames);
 
     // Extract sample data rows (up to 30 rows for live preview)
     const dataRows: Array<Record<string, any>> = [];
-    const startRow = sheet.rowCount >= 3 && !sheet.getRow(2).getCell(1).value ? 3 : 2;
+    const startRow = bestHeaderRow + 1;
     sheet.eachRow((row, rowNumber) => {
       if (rowNumber >= startRow && dataRows.length < 30) {
         const rowObj: Record<string, any> = {};
         colNames.forEach((hdr) => {
           let cIndex = -1;
           const cleanBaseHdr = hdr.replace(/\s*\(\d+\)$/, "").toLowerCase();
-          const r1Vals = sheet.getRow(1).values as Array<unknown>;
-          const r2Vals = sheet.getRow(2).values as Array<unknown>;
-          if (r1Vals) {
-            const idx = r1Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
+          const rBestVals = sheet.getRow(bestHeaderRow).values as Array<unknown>;
+          if (rBestVals) {
+            const idx = rBestVals.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
             if (idx > 0) cIndex = idx;
           }
-          if (cIndex === -1 && r2Vals) {
-            const idx = r2Vals.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
-            if (idx > 0) cIndex = idx;
+          if (cIndex === -1 && bestHeaderRow > 1) {
+            const rPrev = sheet.getRow(bestHeaderRow - 1).values as Array<unknown>;
+            if (rPrev) {
+              const idx = rPrev.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
+              if (idx > 0) cIndex = idx;
+            }
+          }
+          if (cIndex === -1 && bestHeaderRow + 1 <= sheet.rowCount) {
+            const rNext = sheet.getRow(bestHeaderRow + 1).values as Array<unknown>;
+            if (rNext) {
+              const idx = rNext.findIndex(v => String(v ?? "").trim().toLowerCase() === cleanBaseHdr);
+              if (idx > 0) cIndex = idx;
+            }
           }
           if (cIndex > 0) {
             rowObj[hdr] = extractCellValue(row.getCell(cIndex));
@@ -514,13 +568,26 @@ export default function ExcelToPptTool() {
     });
     setSampleRows(dataRows);
 
-    // Intelligent Auto-Mapping
-    const findCol = (...needles: string[]) =>
-      colNames.find(h => needles.some(n => h.toLowerCase() === n.toLowerCase() || h.toLowerCase().includes(n.toLowerCase()))) ?? "";
+    // Intelligent Auto-Mapping: prioritize candidate columns that actually contain data in dataRows
+    const hasData = (colName: string) =>
+      dataRows.some(row => Boolean(row[colName] && String(row[colName]).trim()));
+
+    const findCol = (...needles: string[]) => {
+      const candidates = colNames.filter(h => {
+        const hLow = h.toLowerCase().replace(/\s*\(\d+\)$/, "").trim();
+        return needles.some(n => {
+          const nLow = n.toLowerCase().trim();
+          return hLow === nLow || hLow.startsWith(nLow) || (nLow.length >= 4 && hLow.includes(nLow));
+        });
+      });
+      const withData = candidates.find(hasData);
+      if (withData) return withData;
+      return candidates[0] ?? "";
+    };
 
     const autoMapped: Mapping = {
-      code: findCol("buyer code", "buyer code / sku", "sku", "item code", "product code", "code"),
-      description: findCol("product description", "description", "product name", "product", "item name", "desc"),
+      code: findCol("buyer code", "buyer code / sku", "sku", "item code", "item no", "item #", "item number", "product code", "product id", "model no", "style no", "art no", "article no", "code", "item"),
+      description: findCol("product description", "description", "product name", "product", "item name", "desc", "title"),
       dim_cm: findCol("product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)"),
       dim_in: findCol("carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)"),
       price: findCol("price (usd)", "price", "mrp", "rate", "cost", "qyt"),
@@ -529,6 +596,9 @@ export default function ExcelToPptTool() {
       height: findCol("height", " h", "hgt"),
       image: findCol("product image (embedded)", "product image", "image", "photo", "picture", "img")
     };
+    if (!autoMapped.code) {
+      autoMapped.code = colNames.find(hasData) || colNames[0] || "";
+    }
     setMapping(autoMapped);
 
     const embeddedCount = Object.keys(imgThumbnails).length;
@@ -815,9 +885,14 @@ export default function ExcelToPptTool() {
       setStatus("Please choose an Excel workbook in Step 1 first.");
       return;
     }
-    if (!mapping.code) {
-      setStatus("Please select the product code / SKU column in Step 3.");
-      return;
+
+    const activeMapping = { ...mapping };
+    if (!activeMapping.code) {
+      const fallbackCode = activeMapping.description || headers.find(h => sampleRows.some(r => Boolean(r[h]))) || headers[0] || "";
+      if (fallbackCode) {
+        activeMapping.code = fallbackCode;
+        setMapping(prev => ({ ...prev, code: fallbackCode }));
+      }
     }
 
     setBusy(true);
@@ -829,7 +904,7 @@ export default function ExcelToPptTool() {
         ? await templateFile.arrayBuffer()
         : base64ToArrayBuffer(DEFAULT_PPT_TEMPLATE_B64);
 
-      const output = await generateCataloguePptx(file, templateBuf, mapping, {
+      const output = await generateCataloguePptx(file, templateBuf, activeMapping, {
         imageFit,
         headerText,
         showHeader,
@@ -2151,7 +2226,7 @@ export default function ExcelToPptTool() {
 
       {/* Action Generation Bar */}
       <div className="ep-action">
-        <div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
           <strong>Ready to Generate</strong>
           <span>
             {file

@@ -348,28 +348,75 @@ export async function generateCataloguePptx(
     console.warn("Could not read embedded worksheet images:", e);
   }
 
-  // Header detection (checks row 1 and row 2)
+  // Header detection: dynamically scan rows 1 through 5 to find the best header row
+  let bestHeaderRow = 1;
+  let maxHeaderScore = -1;
+  const recognizedTerms = [
+    "code", "sku", "item", "product", "desc", "description", "cm", "inch",
+    "dim", "size", "price", "image", "photo", "mrp", "rate", "cost", "buyer",
+    "model", "style", "art", "ref", "name", "picture"
+  ];
+
+  for (let r = 1; r <= Math.min(5, ws.rowCount); r++) {
+    const row = ws.getRow(r);
+    let populatedCount = 0;
+    let matchScore = 0;
+    row.eachCell((cell) => {
+      const v = extractCellValue(cell).toLowerCase().trim();
+      if (v) {
+        populatedCount++;
+        if (recognizedTerms.some(term => v.includes(term))) {
+          matchScore += 4;
+        } else {
+          matchScore += 1;
+        }
+      }
+    });
+    if (matchScore > maxHeaderScore && populatedCount >= 1) {
+      maxHeaderScore = matchScore;
+      bestHeaderRow = r;
+    }
+  }
+
   const headers: Record<string, number> = {};
   const headerColCounts: Record<string, number> = {};
-  const r1 = ws.getRow(1);
-  r1.eachCell((cell, colNumber) => {
+
+  const registerHeader = (name: string, colNum: number) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const lower = trimmed.toLowerCase();
+    headerColCounts[lower] = (headerColCounts[lower] || 0) + 1;
+    if (headerColCounts[lower] === 1) {
+      headers[lower] = colNum;
+      headers[`${lower} (1)`] = colNum;
+    } else {
+      headers[`${lower} (${headerColCounts[lower]})`] = colNum;
+    }
+  };
+
+  ws.getRow(bestHeaderRow).eachCell((cell, colNumber) => {
     const rawVal = extractCellValue(cell);
     if (rawVal) {
-      const lower = rawVal.toLowerCase();
-      headers[lower] = colNumber;
-      headerColCounts[lower] = (headerColCounts[lower] || 0) + 1;
-      if (headerColCounts[lower] > 1) {
-        headers[`${lower} (${headerColCounts[lower]})`] = colNumber;
-      }
+      registerHeader(rawVal, colNumber);
     }
   });
 
-  if (Object.keys(headers).length < 2 && ws.rowCount >= 2) {
-    ws.getRow(2).eachCell((cell, colNumber) => {
+  // Check adjacent rows (e.g. multi-row merged headers on row above or below)
+  if (bestHeaderRow > 1) {
+    ws.getRow(bestHeaderRow - 1).eachCell((cell, colNumber) => {
       const rawVal = extractCellValue(cell);
       if (rawVal) {
-        const lower = rawVal.toLowerCase();
-        if (!headers[lower]) headers[lower] = colNumber;
+        const lower = rawVal.toLowerCase().trim();
+        if (!headers[lower]) registerHeader(rawVal, colNumber);
+      }
+    });
+  }
+  if (bestHeaderRow + 1 <= ws.rowCount) {
+    ws.getRow(bestHeaderRow + 1).eachCell((cell, colNumber) => {
+      const rawVal = extractCellValue(cell);
+      if (rawVal) {
+        const lower = rawVal.toLowerCase().trim();
+        if (!headers[lower]) registerHeader(rawVal, colNumber);
       }
     });
   }
@@ -377,9 +424,31 @@ export async function generateCataloguePptx(
   const findColNumber = (name: string): number | null => {
     if (!name) return null;
     const target = name.trim().toLowerCase();
-    if (headers[target]) return headers[target];
+
+    // 1. Direct exact match in headers
+    if (headers[target] !== undefined) return headers[target];
+
+    // 2. Disambiguated base match e.g. "Buyer Code (2)" -> try exact or base "Buyer Code"
+    const baseTarget = target.replace(/\s*\(\d+\)$/, "").trim();
+    if (headers[baseTarget] !== undefined) return headers[baseTarget];
+
+    // 3. Normalization (strip non-alphanumeric)
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const targetNorm = norm(target);
     for (const [k, v] of Object.entries(headers)) {
-      if (k === target || k.includes(target) || target.includes(k)) return v;
+      if (norm(k) === targetNorm) return v;
+    }
+
+    // 4. Exact word / phrase match (NEVER match single letters or short fragments < 3 chars)
+    for (const [k, v] of Object.entries(headers)) {
+      const cleanK = k.replace(/\s*\(\d+\)$/, "").trim();
+      if (cleanK.length >= 3 && target.length >= 3) {
+        if (cleanK === target || norm(cleanK) === norm(target)) return v;
+        const escapedT = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`\\b${escapedT}\\b`, "i").test(cleanK)) return v;
+        const escapedK = cleanK.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`\\b${escapedK}\\b`, "i").test(target)) return v;
+      }
     }
     return null;
   };
@@ -397,8 +466,8 @@ export async function generateCataloguePptx(
     return null;
   };
 
-  const codeCol = getCol("code", "buyer code", "buyer code / sku", "sku", "item code", "product code", "code");
-  const descCol = getCol("description", "product description", "description", "product name", "product", "item name", "desc");
+  const codeCol = getCol("code", "buyer code", "buyer code / sku", "sku", "item code", "item no", "item #", "product code", "product id", "model no", "style no", "art no", "article no", "code", "item");
+  const descCol = getCol("description", "product description", "description", "product name", "product", "item name", "item description", "desc");
   const dimCmCol = getCol("dim_cm", "product dimension (cm)", "dimension (cm)", "dimensions (cm)", "dimension cm", "size cm", "size (cm)");
   const dimInCol = getCol("dim_in", "carton dimension (inch)", "dimension (inch)", "dimensions (inch)", "dimension in", "size in", "size (inch)");
   const priceCol = getCol("price", "price (usd)", "price", "mrp", "rate", "cost");
@@ -406,10 +475,6 @@ export async function generateCataloguePptx(
   const wCol = getCol("width", "width", "breadth", " w");
   const hCol = getCol("height", "height", " h");
   const imageCol = getCol("image", "product image (embedded)", "product image", "image", "photo", "picture", "img");
-
-  if (!codeCol) {
-    throw new Error("Product Code / SKU column could not be identified. Please confirm column mapping.");
-  }
 
   // Extract products
   const products: Array<{
@@ -422,60 +487,80 @@ export async function generateCataloguePptx(
     imageLink?: string;
   }> = [];
 
-  const startRow = ws.rowCount >= 3 && !ws.getRow(2).getCell(codeCol).value ? 3 : 2;
+  const startRow = bestHeaderRow + 1;
 
   ws.eachRow((row, rIdx) => {
     // Skip hidden rows if any
     if ((row as any).hidden) return;
 
     if (rIdx >= startRow) {
-      const codeRaw = extractCellValue(row.getCell(codeCol));
-      if (codeRaw) {
-        const code = codeRaw;
-        const desc = descCol ? extractCellValue(row.getCell(descCol)) : "";
-        let d_cm = dimCmCol ? extractCellValue(row.getCell(dimCmCol)) : "";
-        let d_in = dimInCol ? extractCellValue(row.getCell(dimInCol)) : "";
-        const lVal = lCol ? extractCellValue(row.getCell(lCol)) : "";
-        const wVal = wCol ? extractCellValue(row.getCell(wCol)) : "";
-        const hVal = hCol ? extractCellValue(row.getCell(hCol)) : "";
+      const codeRaw = codeCol ? extractCellValue(row.getCell(codeCol)) : "";
+      const desc = descCol ? extractCellValue(row.getCell(descCol)) : "";
+      let d_cm = dimCmCol ? extractCellValue(row.getCell(dimCmCol)) : "";
+      let d_in = dimInCol ? extractCellValue(row.getCell(dimInCol)) : "";
+      const lVal = lCol ? extractCellValue(row.getCell(lCol)) : "";
+      const wVal = wCol ? extractCellValue(row.getCell(wCol)) : "";
+      const hVal = hCol ? extractCellValue(row.getCell(hCol)) : "";
 
-        if (!d_cm && (lVal || wVal || hVal)) {
-          d_cm = [lVal, wVal, hVal].filter(Boolean).join(" x ") + " CM";
-        } else if (d_cm && !d_cm.toUpperCase().endsWith("CM")) {
-          d_cm = `${d_cm} CM`;
+      if (!d_cm && (lVal || wVal || hVal)) {
+        d_cm = [lVal, wVal, hVal].filter(Boolean).join(" x ") + " CM";
+      } else if (d_cm && !d_cm.toUpperCase().endsWith("CM")) {
+        d_cm = `${d_cm} CM`;
+      }
+
+      if (!d_in && (lVal || wVal || hVal)) {
+        try {
+          const parts = [lVal, wVal, hVal].filter(Boolean).map(v => {
+            const n = parseFloat(v);
+            return isNaN(n) ? v : (n / 2.54).toFixed(1);
+          });
+          d_in = parts.join(" x ") + " IN";
+        } catch {}
+      } else if (d_in && !d_in.toUpperCase().endsWith("IN")) {
+        d_in = `${d_in} IN`;
+      }
+
+      const priceVal = priceCol ? extractCellValue(row.getCell(priceCol)) : "";
+
+      // Embedded image lookup: prefer image in mapped image column, fallback to row
+      let embeddedImg: any = null;
+      if (imageCol && imgByRowAndCol.has(`${rIdx}_${imageCol}`)) {
+        embeddedImg = imgByRowAndCol.get(`${rIdx}_${imageCol}`);
+      } else if (imgByRow.has(rIdx)) {
+        embeddedImg = imgByRow.get(rIdx);
+      }
+
+      let linkVal = "";
+      if (!embeddedImg && imageCol) {
+        const rawImgCell = row.getCell(imageCol).value;
+        if (typeof rawImgCell === "string") {
+          linkVal = rawImgCell.trim();
+        } else if (rawImgCell && typeof rawImgCell === "object") {
+          linkVal = String((rawImgCell as any).hyperlink || (rawImgCell as any).text || "").trim();
         }
+      }
 
-        if (!d_in && (lVal || wVal || hVal)) {
-          try {
-            const parts = [lVal, wVal, hVal].filter(Boolean).map(v => {
-              const n = parseFloat(v);
-              return isNaN(n) ? v : (n / 2.54).toFixed(1);
-            });
-            d_in = parts.join(" x ") + " IN";
-          } catch {}
-        } else if (d_in && !d_in.toUpperCase().endsWith("IN")) {
-          d_in = `${d_in} IN`;
-        }
+      // Check if this row has any product data (text, image, dimensions, or price)
+      let hasRowContent = Boolean(
+        codeRaw ||
+        desc ||
+        priceVal ||
+        embeddedImg ||
+        linkVal ||
+        d_cm ||
+        d_in
+      );
 
-        const priceVal = priceCol ? extractCellValue(row.getCell(priceCol)) : "";
+      if (!hasRowContent) {
+        row.eachCell((cell) => {
+          if (extractCellValue(cell)) hasRowContent = true;
+        });
+      }
 
-        // Embedded image lookup: prefer image in mapped image column, fallback to row
-        let embeddedImg: any = null;
-        if (imageCol && imgByRowAndCol.has(`${rIdx}_${imageCol}`)) {
-          embeddedImg = imgByRowAndCol.get(`${rIdx}_${imageCol}`);
-        } else if (imgByRow.has(rIdx)) {
-          embeddedImg = imgByRow.get(rIdx);
-        }
-
-        let linkVal = "";
-        if (!embeddedImg && imageCol) {
-          const rawImgCell = row.getCell(imageCol).value;
-          if (typeof rawImgCell === "string") {
-            linkVal = rawImgCell.trim();
-          } else if (rawImgCell && typeof rawImgCell === "object") {
-            linkVal = String((rawImgCell as any).hyperlink || (rawImgCell as any).text || "").trim();
-          }
-        }
+      if (hasRowContent) {
+        // Fallback for missing SKU: use codeRaw if available, or generate a clean sequential SKU
+        const itemNumber = products.length + 1;
+        const code = codeRaw || `SKU-${String(itemNumber).padStart(4, "0")}`;
 
         products.push({
           code,
@@ -491,7 +576,7 @@ export async function generateCataloguePptx(
   });
 
   if (products.length === 0) {
-    throw new Error("No product records found in the Excel sheet. Ensure the mapped SKU column contains data.");
+    throw new Error("No product records found in the Excel sheet. Ensure the worksheet contains data rows.");
   }
 
   onProgress?.("template", 25, `Loaded ${products.length} products. Loading PowerPoint base template…`);
