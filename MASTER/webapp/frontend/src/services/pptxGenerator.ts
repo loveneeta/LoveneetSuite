@@ -834,7 +834,13 @@ export async function generateCataloguePptx(
         const fontNameClean = escapeXml(fontName || "Calibri");
         const fontColorXml = fontColor ? `<a:srgbClr val="${fontColor.replace("#", "")}"/>` : "";
 
-        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" b="1" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p><a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
+        const alignH = userSlot?.alignH || "left";
+        const alignV = userSlot?.alignV || "top";
+        const anchorVal = alignV === "top" ? "t" : alignV === "bottom" ? "b" : "ctr";
+        const algnVal = alignH === "center" ? "ctr" : alignH === "right" ? "r" : "l";
+        const pPrXml = `<a:pPr algn="${algnVal}"/>`;
+
+        const newTxBody = `<p:txBody><a:bodyPr vert="horz" lIns="91440" tIns="45720" rIns="91440" bIns="45720" rtlCol="0" anchor="${anchorVal}"/><a:lstStyle/><a:p>${pPrXml}<a:r><a:rPr lang="en-US" b="1" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.code)} | </a:t></a:r><a:r><a:rPr lang="en-US" b="0" sz="${szMain}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(prod.description)}</a:t></a:r></a:p>${dimStr ? `<a:p>${pPrXml}<a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>${escapeXml(dimStr)}</a:t></a:r></a:p>` : ""}${prod.price ? `<a:p>${pPrXml}<a:r><a:rPr lang="en-US" b="1" sz="${szSub}"><a:latin typeface="${fontNameClean}"/>${fontColorXml}</a:rPr><a:t>PRICE : ${escapeXml(prod.price)}</a:t></a:r></a:p>` : ""}</p:txBody>`;
 
         if (slot) {
           let updatedSlot = slot.rawXml.replace(/<p:txBody>[\s\S]*?<\/p:txBody>/, () => newTxBody);

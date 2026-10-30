@@ -422,6 +422,116 @@
   border-color: #f59e0b !important;
   background: rgba(245, 158, 11, 0.08) !important;
 }
+
+/* Floating alignment toolbar on text box */
+.ep-box-align-toolbar {
+  position: absolute;
+  top: -26px;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 1px 3px;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.ep-live-product-text-box:hover .ep-box-align-toolbar,
+.ep-live-product-text-box.is-selected .ep-box-align-toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ep-align-btn-group {
+  display: inline-flex;
+  gap: 1px;
+}
+.ep-align-btn-group button {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+.ep-align-btn-group button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+}
+.ep-align-btn-group button.active {
+  background: #f59e0b;
+  color: #0f172a;
+}
+.ep-align-divider {
+  width: 1px;
+  height: 12px;
+  background: #475569;
+  margin: 0 2px;
+}
+
+/* Dedicated Text Alignment Control Cards */
+.ep-text-align-section {
+  margin-top: 16px;
+  background: #090e1a;
+  border: 1px solid #1a253a;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.ep-align-boxes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.ep-align-box-card {
+  background: #0d1527;
+  border: 1px solid #243352;
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ep-align-box-header {
+  font-size: 11px;
+  color: #fbbf24;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ep-align-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ep-align-control-row span {
+  font-size: 10px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+.ep-align-control-row .ep-btn-group button {
+  padding: 5px 8px;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ep-align-control-row .ep-btn-group button.selected {
+  background: #f59e0b;
+  color: #0f172a;
+  font-weight: 700;
+  box-shadow: none;
+}
 .ep-live-size-badge {
   position: absolute;
   top: 4px;

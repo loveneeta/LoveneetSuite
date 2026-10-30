@@ -24,7 +24,13 @@ import {
   ExternalLink,
   ShieldCheck,
   Layers,
-  FileText
+  FileText,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  AlignVerticalJustifyStart,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd
 } from "lucide-react";
 import { storageAdapter, isDesktop } from "./services/platform";
 import {
@@ -38,6 +44,8 @@ import { parseXmlDocument } from "./services/xmlHelper";
 import {
   Slot,
   ProductsPerSlide,
+  TextAlignH,
+  TextAlignV,
   DEFAULT_LAYOUT,
   THREE_LAYOUT,
   adjustLayoutSlots,
@@ -365,7 +373,7 @@ export default function ExcelToPptTool() {
       imageFit,
       selectedSlideIndex,
       count,
-      layout: layout.map(s => ({ img: [...s.img], text: [...s.text] })),
+      layout: layout.map(s => ({ img: [...s.img], text: [...s.text], alignH: s.alignH, alignV: s.alignV })),
       fontSize,
       fontName,
       fontColor,
@@ -760,6 +768,26 @@ export default function ExcelToPptTool() {
     setLayout(adjustLayoutSlots([], count));
     setRatio("16:9");
     setAutoCenter(true);
+  };
+
+  const setSlotAlignH = (slotIndex: number, align: TextAlignH) => {
+    setLayout(prev =>
+      prev.map((s, idx) => (idx === slotIndex ? { ...s, alignH: align } : s))
+    );
+  };
+
+  const setSlotAlignV = (slotIndex: number, align: TextAlignV) => {
+    setLayout(prev =>
+      prev.map((s, idx) => (idx === slotIndex ? { ...s, alignV: align } : s))
+    );
+  };
+
+  const setAllAlignH = (align: TextAlignH) => {
+    setLayout(prev => prev.map(s => ({ ...s, alignH: align })));
+  };
+
+  const setAllAlignV = (align: TextAlignV) => {
+    setLayout(prev => prev.map(s => ({ ...s, alignV: align })));
   };
 
   const getSlideAspectStyle = (r: SlideRatio): React.CSSProperties => {
@@ -1681,7 +1709,7 @@ export default function ExcelToPptTool() {
                     />
                   </div>
 
-                  {/* Live Product Text Box (Draggable & Resizable) */}
+                  {/* Live Product Text Box (Draggable & Resizable with Alignment Controls) */}
                   <div
                     className={`ep-live-product-text-box ${drag?.slot === i && drag?.section === "text" ? "is-selected" : ""}`}
                     style={{
@@ -1694,7 +1722,19 @@ export default function ExcelToPptTool() {
                       color: `#${fontColor.replace("#", "")}`,
                       display: "flex",
                       flexDirection: "column",
-                      justifyContent: "flex-start",
+                      textAlign: slot.alignH || "left",
+                      justifyContent:
+                        (slot.alignV || "top") === "top"
+                          ? "flex-start"
+                          : (slot.alignV || "top") === "bottom"
+                          ? "flex-end"
+                          : "center",
+                      alignItems:
+                        (slot.alignH || "left") === "center"
+                          ? "center"
+                          : (slot.alignH || "left") === "right"
+                          ? "flex-end"
+                          : "flex-start",
                       lineHeight: 1.35,
                       overflow: "hidden",
                       cursor: "move",
@@ -1702,11 +1742,68 @@ export default function ExcelToPptTool() {
                     }}
                     onPointerDown={e => beginDrag(e, i, "text", "move")}
                   >
-                    <div style={{ fontSize: `${Math.round(fontSize * 1.05)}px`, fontWeight: 700, marginBottom: "2px" }}>
+                    {/* Floating Alignment Bar directly on Text Box */}
+                    <div className="ep-box-align-toolbar" onPointerDown={e => e.stopPropagation()}>
+                      <div className="ep-align-btn-group">
+                        <button
+                          type="button"
+                          className={(slot.alignH || "left") === "left" ? "active" : ""}
+                          title="Align Left"
+                          onClick={e => { e.stopPropagation(); setSlotAlignH(i, "left"); }}
+                        >
+                          <AlignLeft size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className={(slot.alignH || "left") === "center" ? "active" : ""}
+                          title="Align Center"
+                          onClick={e => { e.stopPropagation(); setSlotAlignH(i, "center"); }}
+                        >
+                          <AlignCenter size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className={(slot.alignH || "left") === "right" ? "active" : ""}
+                          title="Align Right"
+                          onClick={e => { e.stopPropagation(); setSlotAlignH(i, "right"); }}
+                        >
+                          <AlignRight size={11} />
+                        </button>
+                      </div>
+                      <div className="ep-align-divider" />
+                      <div className="ep-align-btn-group">
+                        <button
+                          type="button"
+                          className={(slot.alignV || "top") === "top" ? "active" : ""}
+                          title="Align Up (Top)"
+                          onClick={e => { e.stopPropagation(); setSlotAlignV(i, "top"); }}
+                        >
+                          <AlignVerticalJustifyStart size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className={(slot.alignV || "top") === "center" ? "active" : ""}
+                          title="Align Center (Middle)"
+                          onClick={e => { e.stopPropagation(); setSlotAlignV(i, "center"); }}
+                        >
+                          <AlignVerticalJustifyCenter size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          className={(slot.alignV || "top") === "bottom" ? "active" : ""}
+                          title="Align Down (Bottom)"
+                          onClick={e => { e.stopPropagation(); setSlotAlignV(i, "bottom"); }}
+                        >
+                          <AlignVerticalJustifyEnd size={11} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ width: "100%", fontSize: `${Math.round(fontSize * 1.05)}px`, fontWeight: 700, marginBottom: "2px", textAlign: slot.alignH || "left" }}>
                       <b>{skuVal}</b> | <span>{descVal}</span>
                     </div>
                     {(cmVal || inVal) && (
-                      <div style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, opacity: 0.85 }}>
+                      <div style={{ width: "100%", fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, opacity: 0.85, textAlign: slot.alignH || "left" }}>
                         {[cmVal, inVal].filter(Boolean).map((d, idx) => (
                           <React.Fragment key={idx}>
                             {idx > 0 && <span> | </span>}
@@ -1716,7 +1813,7 @@ export default function ExcelToPptTool() {
                       </div>
                     )}
                     {priceVal && (
-                      <div style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, fontWeight: 600, marginTop: "2px" }}>
+                      <div style={{ width: "100%", fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, fontWeight: 600, marginTop: "2px", textAlign: slot.alignH || "left" }}>
                         {priceVal}
                       </div>
                     )}
@@ -1737,11 +1834,105 @@ export default function ExcelToPptTool() {
         {/* Live Legend Bar */}
         <div className="ep-preview-legend-row" style={{ marginTop: "12px" }}>
           <span>
-            <Info size={14} /> <b>Interactive Live Studio:</b> Click and drag photos or text boxes to reposition. Drag the bottom-right corner handles to resize.
+            <Info size={14} /> <b>Interactive Live Studio:</b> Click and drag photos or text boxes to reposition. Drag the bottom-right corner handles to resize. Hover over any text box to quickly adjust its alignment.
           </span>
           <span className="ep-legend-badge">
             {sampleRows.length} Total Records Loaded
           </span>
+        </div>
+
+        {/* Dedicated Text Alignment Control Cards for Each Product Box */}
+        <div className="ep-text-align-section">
+          <div className="ep-template-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+            <div>
+              <h4>Text Alignment (Left / Center / Right · Up / Center / Down)</h4>
+              <p>Adjust horizontal and vertical alignment for each product text box independently or apply to all.</p>
+            </div>
+            <div style={{ display: "inline-flex", gap: "10px", alignItems: "center" }}>
+              <span style={{ fontSize: "11px", color: "#94a3b8" }}>Apply to All:</span>
+              <div className="ep-btn-group">
+                <button type="button" onClick={() => setAllAlignH("left")} title="Left Align All"><AlignLeft size={12} /> Left</button>
+                <button type="button" onClick={() => setAllAlignH("center")} title="Center Align All"><AlignCenter size={12} /> Center</button>
+                <button type="button" onClick={() => setAllAlignH("right")} title="Right Align All"><AlignRight size={12} /> Right</button>
+              </div>
+              <div className="ep-btn-group">
+                <button type="button" onClick={() => setAllAlignV("top")} title="Align All Up/Top"><AlignVerticalJustifyStart size={12} /> Up</button>
+                <button type="button" onClick={() => setAllAlignV("center")} title="Align All Middle"><AlignVerticalJustifyCenter size={12} /> Center</button>
+                <button type="button" onClick={() => setAllAlignV("bottom")} title="Align All Down/Bottom"><AlignVerticalJustifyEnd size={12} /> Down</button>
+              </div>
+            </div>
+          </div>
+
+          <div className="ep-align-boxes-grid">
+            {layout.map((s, idx) => {
+              const h = s.alignH || "left";
+              const v = s.alignV || "top";
+              return (
+                <div key={idx} className="ep-align-box-card">
+                  <div className="ep-align-box-header">
+                    <strong>Product {idx + 1} Text Box</strong>
+                    <small style={{ color: "#fbbf24", fontWeight: 700 }}>
+                      {h.toUpperCase()} · {v.toUpperCase()}
+                    </small>
+                  </div>
+
+                  <div className="ep-align-control-row">
+                    <span>Horizontal</span>
+                    <div className="ep-btn-group">
+                      <button
+                        type="button"
+                        className={h === "left" ? "selected" : ""}
+                        onClick={() => setSlotAlignH(idx, "left")}
+                      >
+                        <AlignLeft size={13} /> Left
+                      </button>
+                      <button
+                        type="button"
+                        className={h === "center" ? "selected" : ""}
+                        onClick={() => setSlotAlignH(idx, "center")}
+                      >
+                        <AlignCenter size={13} /> Center
+                      </button>
+                      <button
+                        type="button"
+                        className={h === "right" ? "selected" : ""}
+                        onClick={() => setSlotAlignH(idx, "right")}
+                      >
+                        <AlignRight size={13} /> Right
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="ep-align-control-row">
+                    <span>Vertical</span>
+                    <div className="ep-btn-group">
+                      <button
+                        type="button"
+                        className={v === "top" ? "selected" : ""}
+                        onClick={() => setSlotAlignV(idx, "top")}
+                      >
+                        <AlignVerticalJustifyStart size={13} /> Up
+                      </button>
+                      <button
+                        type="button"
+                        className={v === "center" ? "selected" : ""}
+                        onClick={() => setSlotAlignV(idx, "center")}
+                      >
+                        <AlignVerticalJustifyCenter size={13} /> Center
+                      </button>
+                      <button
+                        type="button"
+                        className={v === "bottom" ? "selected" : ""}
+                        onClick={() => setSlotAlignV(idx, "bottom")}
+                      >
+                        <AlignVerticalJustifyEnd size={13} /> Down
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* Typography & Color Styling Grid */}

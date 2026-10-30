@@ -4,9 +4,14 @@
  * Shared across Layout Canvas, Live Preview, and PPTX Generator.
  */
 
+export type TextAlignH = "left" | "center" | "right";
+export type TextAlignV = "top" | "center" | "bottom";
+
 export interface Slot {
   img: [number, number, number, number]; // [left, top, right, bottom] in 800x450 scale
   text: [number, number, number, number];
+  alignH?: TextAlignH;
+  alignV?: TextAlignV;
 }
 
 export type ProductsPerSlide = 2 | 3;
@@ -33,23 +38,30 @@ export function adjustLayoutSlots(currentSlots: Slot[] | undefined, targetCount:
   const baseDefaults = count === 2 ? DEFAULT_LAYOUT : THREE_LAYOUT;
   const current = currentSlots && currentSlots.length > 0 ? currentSlots : baseDefaults;
 
+  const cloneSlot = (s: Slot): Slot => {
+    const res: Slot = {
+      img: [...s.img] as [number, number, number, number],
+      text: [...s.text] as [number, number, number, number],
+    };
+    if (s.alignH) res.alignH = s.alignH;
+    if (s.alignV) res.alignV = s.alignV;
+    return res;
+  };
+
   if (current.length === count) {
-    return current.map(s => ({ img: [...s.img] as [number, number, number, number], text: [...s.text] as [number, number, number, number] }));
+    return current.map(cloneSlot);
   }
 
   if (current.length > count) {
     // Truncate extra slots; keep surviving slots coordinates untouched
-    return current.slice(0, count).map(s => ({ img: [...s.img] as [number, number, number, number], text: [...s.text] as [number, number, number, number] }));
+    return current.slice(0, count).map(cloneSlot);
   }
 
   // Expanding (e.g. 2 -> 3): keep existing slots untouched, add new default slot(s)
-  const expanded: Slot[] = current.map(s => ({ img: [...s.img] as [number, number, number, number], text: [...s.text] as [number, number, number, number] }));
+  const expanded: Slot[] = current.map(cloneSlot);
   for (let i = current.length; i < count; i++) {
     const defaultSlot = THREE_LAYOUT[i] || DEFAULT_LAYOUT[i] || { img: [25 + i * 260, 108, 265 + i * 260, 273], text: [25 + i * 260, 290, 265 + i * 260, 390] };
-    expanded.push({
-      img: [...defaultSlot.img] as [number, number, number, number],
-      text: [...defaultSlot.text] as [number, number, number, number],
-    });
+    expanded.push(cloneSlot(defaultSlot));
   }
 
   return expanded;
