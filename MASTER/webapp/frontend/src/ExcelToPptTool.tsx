@@ -439,7 +439,18 @@ export default function ExcelToPptTool() {
         );
         if (media && media.buffer && rowNum > 0 && !imgThumbnails[rowNum]) {
           const blob = new Blob([media.buffer], { type: `image/${media.extension || "jpeg"}` });
-          imgThumbnails[rowNum] = URL.createObjectURL(blob);
+          const objUrl = URL.createObjectURL(blob);
+          imgThumbnails[rowNum] = objUrl;
+
+          // Preload natural dimensions for perfect aspect ratio & cropping
+          if (typeof Image !== "undefined") {
+            const imgObj = new Image();
+            imgObj.onload = () => {
+              (media as any).width = imgObj.naturalWidth;
+              (media as any).height = imgObj.naturalHeight;
+            };
+            imgObj.src = objUrl;
+          }
         }
       }
     } catch (e) {
@@ -680,6 +691,8 @@ export default function ExcelToPptTool() {
       const clientData = await inspectTemplateClient(next);
       setTemplateInfo(clientData);
       setSelectedSlideIndex(clientData.recommended_product_slide || 0);
+      if (clientData.aspect_ratio === "4:3") setRatio("4:3");
+      else if (clientData.aspect_ratio === "16:9") setRatio("16:9");
 
       const activeSlide = clientData.slides[clientData.recommended_product_slide || 0];
       const slotsDetected = activeSlide ? activeSlide.slots_count : 3;
@@ -748,7 +761,20 @@ export default function ExcelToPptTool() {
     setRatio("16:9");
     setAutoCenter(true);
   };
-  const ratioValue = ratio === "4:3" ? 4 / 3 : ratio === "A4 Landscape" ? 297 / 210 : ratio === "A4 Portrait" ? 210 / 297 : 16 / 9;
+
+  const getSlideAspectStyle = (r: SlideRatio): React.CSSProperties => {
+    switch (r) {
+      case "4:3":
+        return { aspectRatio: "4 / 3", maxWidth: "660px", width: "100%", margin: "0 auto" };
+      case "A4 Landscape":
+        return { aspectRatio: "297 / 210", maxWidth: "780px", width: "100%", margin: "0 auto" };
+      case "A4 Portrait":
+        return { aspectRatio: "210 / 297", maxWidth: "440px", width: "100%", margin: "0 auto" };
+      case "16:9":
+      default:
+        return { aspectRatio: "16 / 9", maxWidth: "100%", width: "100%", margin: "0 auto" };
+    }
+  };
 
   // Step state calculations
   const isStep1Done = Boolean(file && sampleRows.length > 0);
@@ -1453,7 +1479,7 @@ export default function ExcelToPptTool() {
             style={{
               touchAction: "none",
               backgroundColor: `#${background.replace("#", "")}`,
-              aspectRatio: String(ratioValue)
+              ...getSlideAspectStyle(ratio)
             }}
           >
             {showHeader && (
@@ -1851,119 +1877,194 @@ export default function ExcelToPptTool() {
           <div
             className="ep-live-slide-canvas"
             style={{
-              aspectRatio: useCustomTemplate && templateInfo ? (templateInfo.aspect_ratio === "4:3" ? "4 / 3" : templateInfo.aspect_ratio === "16:9" ? "16 / 9" : String(ratioValue)) : String(ratioValue),
-              backgroundColor: useCustomTemplate ? "#ffffff" : `#${background.replace("#", "")}`
+              ...getSlideAspectStyle(ratio),
+              backgroundColor: `#${background.replace("#", "")}`,
+              position: "relative"
             }}
           >
-            {useCustomTemplate ? (
-              <>
-                {showHeader && (
-                  <div className="ep-preview-top-brand" style={{ color: `#${fontColor.replace("#", "")}` }}>
-                    <div className="ep-preview-noble-brand" style={{ fontFamily: fontName }}>
-                      {headerText || "NOBLE SELECTIONS"}
-                    </div>
-                    {logoUrl ? (
-                      <img src={logoUrl} alt="Logo" style={{ maxHeight: "32px", maxWidth: "120px", objectFit: "contain" }} />
+            {/* Header & Logo */}
+            {showHeader && (
+              <div
+                className="ep-preview-top-brand"
+                style={{
+                  position: "absolute",
+                  left: "4%",
+                  top: "3%",
+                  right: "4%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  color: `#${fontColor.replace("#", "")}`,
+                  zIndex: 2,
+                  pointerEvents: "none"
+                }}
+              >
+                <div className="ep-preview-noble-brand" style={{ fontFamily: fontName, fontSize: "clamp(11px, 1.6vw, 16px)", fontWeight: 800 }}>
+                  {headerText || (useCustomTemplate ? "NOBLE SELECTIONS" : "PRODUCT COLLECTION")}
+                </div>
+                {logoUrl ? (
+                  <img src={logoUrl} alt="Logo" style={{ maxHeight: "30px", maxWidth: "120px", objectFit: "contain" }} />
+                ) : useCustomTemplate ? (
+                  <div className="ep-preview-vector-logo">
+                    <span className="logo-icon">NS</span>
+                    <span className="logo-sub">EST. 1988</span>
+                  </div>
+                ) : null}
+              </div>
+            )}
+            {showRule && (
+              <div
+                className="ep-preview-template-rule"
+                style={{
+                  position: "absolute",
+                  left: "4%",
+                  top: "8.5%",
+                  right: "4%",
+                  height: "1px",
+                  backgroundColor: `#${fontColor.replace("#", "")}`,
+                  opacity: 0.25,
+                  zIndex: 2,
+                  pointerEvents: "none"
+                }}
+              />
+            )}
+
+            {/* Visual Products placed at exact custom canvas layout coordinates */}
+            {layout.map((slot, i) => {
+              const prod = currentSlideProducts[i];
+              const imgW = slot.img[2] - slot.img[0];
+              const imgH = slot.img[3] - slot.img[1];
+              const textW = slot.text[2] - slot.text[0];
+              const textH = slot.text[3] - slot.text[1];
+              const imgLeft = autoCenter
+                ? Math.max(0, Math.min(800 - imgW, (slot.text[0] + slot.text[2]) / 2 - imgW / 2))
+                : slot.img[0];
+
+              if (!prod) {
+                return (
+                  <div
+                    key={`empty_${i}`}
+                    style={{
+                      position: "absolute",
+                      left: `${imgLeft / 8}%`,
+                      top: `${slot.img[1] / 4.5}%`,
+                      width: `${imgW / 8}%`,
+                      height: `${imgH / 4.5}%`,
+                      border: "1px dashed #cbd5e1",
+                      borderRadius: "6px",
+                      display: "grid",
+                      placeItems: "center",
+                      color: "#94a3b8",
+                      fontSize: "10px"
+                    }}
+                  >
+                    <span>Empty Slot</span>
+                  </div>
+                );
+              }
+
+              const skuVal = prod[mapping.code] || "SKU-00000";
+              const descVal = prod[mapping.description] || "Product Description";
+              const cmVal = prod[mapping.dim_cm] || (prod[mapping.length] && prod[mapping.width] && prod[mapping.height] ? `${prod[mapping.length]} x ${prod[mapping.width]} x ${prod[mapping.height]} CM` : "");
+              let inVal = prod[mapping.dim_in] || "";
+              if (!inVal && prod[mapping.length] && prod[mapping.width] && prod[mapping.height]) {
+                try {
+                  const lIn = (parseFloat(prod[mapping.length]) / 2.54).toFixed(1);
+                  const wIn = (parseFloat(prod[mapping.width]) / 2.54).toFixed(1);
+                  const hIn = (parseFloat(prod[mapping.height]) / 2.54).toFixed(1);
+                  if (!isNaN(parseFloat(lIn)) && !isNaN(parseFloat(wIn)) && !isNaN(parseFloat(hIn))) {
+                    inVal = `${lIn} x ${wIn} x ${hIn} IN`;
+                  }
+                } catch {}
+              }
+              const priceVal = prod[mapping.price] ? `PRICE : ${prod[mapping.price]}` : "";
+
+              return (
+                <React.Fragment key={i}>
+                  {/* Live Product Image Box */}
+                  <div
+                    className="ep-live-product-image-box"
+                    style={{
+                      position: "absolute",
+                      left: `${imgLeft / 8}%`,
+                      top: `${slot.img[1] / 4.5}%`,
+                      width: `${imgW / 8}%`,
+                      height: `${imgH / 4.5}%`,
+                      overflow: "hidden",
+                      borderRadius: "6px",
+                      backgroundColor: "#f1f5f9",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center"
+                    }}
+                  >
+                    {prod.__thumbnail ? (
+                      <img
+                        src={prod.__thumbnail}
+                        alt={skuVal}
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: imageFit,
+                          display: "block"
+                        }}
+                      />
                     ) : (
-                      <div className="ep-preview-vector-logo">
-                        <span className="logo-icon">NS</span>
-                        <span className="logo-sub">EST. 1988</span>
+                      <div className="ep-slot-image-placeholder">
+                        <ImageIcon size={28} />
+                        <span>Product Photo</span>
+                        <small>{imageFit === "contain" ? "Shrink & Fit" : "Crop & Fit"}</small>
                       </div>
                     )}
                   </div>
-                )}
-                {showRule && <div className="ep-preview-template-rule" />}
-              </>
-            ) : (
-              <>
-                {showHeader && (
-                  <div className="ep-preview-header" style={{ fontFamily: fontName, color: `#${fontColor.replace("#", "")}` }}>
-                    <span>{headerText || "PRODUCT COLLECTION"}</span>
-                    {logoUrl && <img src={logoUrl} alt="Logo" style={{ maxHeight: "28px", maxWidth: "100px", objectFit: "contain" }} />}
-                  </div>
-                )}
-                {showRule && <div className="ep-preview-rule" />}
-              </>
-            )}
 
-            <div className={`ep-preview-slots-grid slots-${count}`}>
-              {Array.from({ length: count }).map((_, slotIdx) => {
-                const prod = currentSlideProducts[slotIdx];
-                if (!prod) {
-                  return (
-                    <div key={slotIdx} className="ep-preview-slot-card slot-empty">
-                      <div className="ep-slot-placeholder-img">
-                        <small>Empty Slot (End of Catalogue)</small>
+                  {/* Live Product Text Details Box */}
+                  <div
+                    className="ep-live-product-text-box"
+                    style={{
+                      position: "absolute",
+                      left: `${slot.text[0] / 8}%`,
+                      top: `${slot.text[1] / 4.5}%`,
+                      width: `${textW / 8}%`,
+                      height: `${textH / 4.5}%`,
+                      fontFamily: fontName,
+                      color: `#${fontColor.replace("#", "")}`,
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "flex-start",
+                      lineHeight: 1.35,
+                      overflow: "hidden"
+                    }}
+                  >
+                    <div style={{ fontSize: `${Math.round(fontSize * 1.05)}px`, fontWeight: 700, marginBottom: "2px" }}>
+                      <b>{skuVal}</b> | <span>{descVal}</span>
+                    </div>
+                    {(cmVal || inVal) && (
+                      <div style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, opacity: 0.85 }}>
+                        {[cmVal, inVal].filter(Boolean).map((d, idx) => (
+                          <React.Fragment key={idx}>
+                            {idx > 0 && <span> | </span>}
+                            <span>{d}</span>
+                          </React.Fragment>
+                        ))}
                       </div>
-                    </div>
-                  );
-                }
-
-                const skuVal = prod[mapping.code] || "SKU-00000";
-                const descVal = prod[mapping.description] || "Product Description";
-                const cmVal = prod[mapping.dim_cm] || (prod[mapping.length] && prod[mapping.width] && prod[mapping.height] ? `${prod[mapping.length]} x ${prod[mapping.width]} x ${prod[mapping.height]} CM` : "");
-                let inVal = prod[mapping.dim_in] || "";
-                if (!inVal && prod[mapping.length] && prod[mapping.width] && prod[mapping.height]) {
-                  try {
-                    const lIn = (parseFloat(prod[mapping.length]) / 2.54).toFixed(1);
-                    const wIn = (parseFloat(prod[mapping.width]) / 2.54).toFixed(1);
-                    const hIn = (parseFloat(prod[mapping.height]) / 2.54).toFixed(1);
-                    if (!isNaN(parseFloat(lIn)) && !isNaN(parseFloat(wIn)) && !isNaN(parseFloat(hIn))) {
-                      inVal = `${lIn} x ${wIn} x ${hIn} IN`;
-                    }
-                  } catch {}
-                }
-                const priceVal = prod[mapping.price] ? `PRICE : ${prod[mapping.price]}` : "";
-
-                return (
-                  <div key={slotIdx} className="ep-preview-slot-card">
-                    <div className="ep-slot-image-box">
-                      {prod.__thumbnail ? (
-                        <img
-                          src={prod.__thumbnail}
-                          alt={skuVal}
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit: imageFit,
-                            borderRadius: "4px"
-                          }}
-                        />
-                      ) : (
-                        <div className="ep-slot-image-placeholder">
-                          <ImageIcon size={32} />
-                          <span>Product Photo</span>
-                          <small>{imageFit === "contain" ? "Shrink & Fit" : "Crop & Fit"}</small>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="ep-slot-info-box" style={{ fontFamily: fontName, color: `#${fontColor.replace("#", "")}` }}>
-                      <div className="ep-info-line-1" style={{ fontSize: `${Math.round(fontSize * 1.05)}px` }}>
-                        <b>{skuVal}</b> | <span>{descVal}</span>
+                    )}
+                    {priceVal && (
+                      <div style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px`, fontWeight: 600, marginTop: "2px" }}>
+                        {priceVal}
                       </div>
-                      {(cmVal || inVal) && (
-                        <div className="ep-info-line-2" style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px` }}>
-                          {[cmVal, inVal].filter(Boolean).map((d, i) => (
-                            <React.Fragment key={i}>
-                              {i > 0 && <span> | </span>}
-                              <span>{d}</span>
-                            </React.Fragment>
-                          ))}
-                        </div>
-                      )}
-                      {priceVal && <div className="ep-info-line-3" style={{ fontSize: `${Math.max(9, Math.round(fontSize * 0.85))}px` }}>{priceVal}</div>}
-                    </div>
+                    )}
                   </div>
-                );
-              })}
-            </div>
+                </React.Fragment>
+              );
+            })}
           </div>
         </div>
 
         <div className="ep-preview-legend-row">
           <span>
-            <Info size={14} /> Slide preview rendered in 16:9 widescreen format with actual records from your spreadsheet.
+            <Info size={14} /> Slide preview rendered in {ratio} format with actual records from your spreadsheet.
           </span>
           <span className="ep-legend-badge">
             {sampleRows.length} Total Records Loaded

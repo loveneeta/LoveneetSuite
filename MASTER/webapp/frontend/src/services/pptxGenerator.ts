@@ -113,9 +113,9 @@ export function extractCellValue(cell: ExcelJS.Cell): string {
 }
 
 /**
- * Extracts width and height from PNG, JPEG, GIF, and WebP image buffers.
+ * Extracts width and height from PNG, JPEG, WebP, GIF, and BMP image buffers.
  */
-export function getImageDimensions(buffer: ArrayBuffer | Uint8Array): { width: number; height: number } | null {
+export function parseBinaryImageDimensions(buffer: ArrayBuffer | Uint8Array): { width: number; height: number } | null {
   const buf = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
   const byteOffset = (buffer && (buffer as any).byteOffset) || 0;
   const byteLength = (buffer && (buffer as any).byteLength) || buf.byteLength;
@@ -127,24 +127,85 @@ export function getImageDimensions(buffer: ArrayBuffer | Uint8Array): { width: n
     return { width: view.getUint32(16), height: view.getUint32(20) };
   }
 
+  // GIF: GIF87a or GIF89a
+  if (view.getUint8(0) === 0x47 && view.getUint8(1) === 0x49 && view.getUint8(2) === 0x46) {
+    return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+  }
+
+  // BMP: BM signature
+  if (view.getUint16(0) === 0x424D && view.byteLength >= 26) {
+    return { width: view.getInt32(18, true), height: Math.abs(view.getInt32(22, true)) };
+  }
+
+  // WebP: RIFF .... WEBP
+  if (view.getUint32(0) === 0x52494646 && view.getUint32(8) === 0x57454250) {
+    const chunkType = view.getUint32(12);
+    // VP8_ (lossy)
+    if (chunkType === 0x56503820 && view.byteLength >= 30) {
+      return { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff };
+    }
+    // VP8L (lossless)
+    if (chunkType === 0x5650384C && view.byteLength >= 25) {
+      const b1 = view.getUint8(21);
+      const b2 = view.getUint8(22);
+      const b3 = view.getUint8(23);
+      const b4 = view.getUint8(24);
+      const width = 1 + (((b2 & 0x3f) << 8) | b1);
+      const height = 1 + (((b4 & 0x0f) << 10) | (b3 << 2) | ((b2 & 0xc0) >> 6));
+      return { width, height };
+    }
+    // VP8X (extended)
+    if (chunkType === 0x56503858 && view.byteLength >= 30) {
+      const width = 1 + (view.getUint8(24) | (view.getUint8(25) << 8) | (view.getUint8(26) << 16));
+      const height = 1 + (view.getUint8(27) | (view.getUint8(28) << 8) | (view.getUint8(29) << 16));
+      return { width, height };
+    }
+  }
+
   // JPEG: start of image FF D8
   if (view.getUint16(0) === 0xFFD8) {
     let offset = 2;
     while (offset < view.byteLength - 8) {
       if (view.getUint8(offset) !== 0xFF) { offset++; continue; }
-      const marker = view.getUint8(offset + 1);
-      // SOF0 to SOF3 markers (excluding DHT 0xC4)
-      if (marker >= 0xC0 && marker <= 0xC3 && marker !== 0xC4) {
-        return { height: view.getUint16(offset + 5), width: view.getUint16(offset + 7) };
+      while (offset < view.byteLength && view.getUint8(offset) === 0xFF) offset++;
+      if (offset >= view.byteLength) break;
+      const marker = view.getUint8(offset);
+      offset++;
+      // Standalone markers
+      if (marker === 0xD8 || marker === 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) continue;
+      if (marker === 0xDA) break; // Start of Scan (entropy data follows)
+      if (offset + 2 > view.byteLength) break;
+      const len = view.getUint16(offset);
+      // SOF markers: SOF0 to SOF3, SOF5 to SOF7, SOF9 to SOF11, SOF13 to SOF15
+      const isSof = (marker >= 0xC0 && marker <= 0xC3) ||
+                    (marker >= 0xC5 && marker <= 0xC7) ||
+                    (marker >= 0xC9 && marker <= 0xCB) ||
+                    (marker >= 0xCD && marker <= 0xCF);
+      if (isSof && offset + 7 <= view.byteLength) {
+        return { height: view.getUint16(offset + 3), width: view.getUint16(offset + 5) };
       }
-      const len = view.getUint16(offset + 2);
-      offset += 2 + len;
+      offset += len;
     }
   }
 
-  // GIF: GIF87a or GIF89a
-  if (view.getUint8(0) === 0x47 && view.getUint8(1) === 0x49 && view.getUint8(2) === 0x46) {
-    return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+  return null;
+}
+
+export async function getImageDimensions(buffer: ArrayBuffer | Uint8Array): Promise<{ width: number; height: number } | null> {
+  const binaryDims = parseBinaryImageDimensions(buffer);
+  if (binaryDims && binaryDims.width > 0 && binaryDims.height > 0) {
+    return binaryDims;
+  }
+
+  // Browser fallback using createImageBitmap
+  if (typeof createImageBitmap === "function") {
+    try {
+      const blob = new Blob([buffer]);
+      const bmp = await createImageBitmap(blob);
+      const res = { width: bmp.width, height: bmp.height };
+      bmp.close();
+      return res;
+    } catch {}
   }
 
   return null;
@@ -862,7 +923,10 @@ export async function generateCataloguePptx(
           let picH = boxH;
           let srcRectXml = "";
 
-          const imgDims = getImageDimensions(imgBuffer);
+          let imgDims = await getImageDimensions(imgBuffer);
+          if (!imgDims && prod.image && (prod.image as any).width && (prod.image as any).height) {
+            imgDims = { width: (prod.image as any).width, height: (prod.image as any).height };
+          }
           if (imgDims && imgDims.width > 0 && imgDims.height > 0) {
             const imgAspect = imgDims.width / imgDims.height;
             const boxAspect = boxW / Math.max(1, boxH);
@@ -901,7 +965,8 @@ export async function generateCataloguePptx(
           }
 
           const picId = 2000 + prodIdx;
-          picsXml += `<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvPicPr><p:cNvPr id="${picId}" name="Picture ${picId}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${imgRelId}"/>${srcRectXml}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${picX}" y="${picY}"/><a:ext cx="${picW}" cy="${picH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+          const picLocksXml = imageFit === "cover" ? "" : `<a:picLocks noChangeAspect="1"/>`;
+          picsXml += `<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvPicPr><p:cNvPr id="${picId}" name="Picture ${picId}"/><p:cNvPicPr>${picLocksXml}</p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${imgRelId}"/>${srcRectXml}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="${picX}" y="${picY}"/><a:ext cx="${picW}" cy="${picH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
         }
       } else if (slot) {
         // Clear empty slots on the final slide
