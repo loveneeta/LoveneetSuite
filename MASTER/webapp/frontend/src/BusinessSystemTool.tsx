@@ -25,8 +25,17 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
   const [loading, setLoading] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
 
-  const ERP_LOCAL_URL = "http://localhost:8080";
-  const ERP_LAN_URL = "http://192.168.1.63:8080";
+  const DEFAULT_LOCAL = "http://localhost:8080";
+  const DEFAULT_LAN = "http://192.168.1.63:8080";
+
+  const [activeUrl, setActiveUrl] = useState<string>(() => {
+    return localStorage.getItem("loveneet_erp_url") || DEFAULT_LOCAL;
+  });
+  const [showConfig, setShowConfig] = useState(false);
+  const [customHost, setCustomHost] = useState(activeUrl);
+
+  const ERP_LOCAL_URL = activeUrl;
+  const ERP_LAN_URL = DEFAULT_LAN;
 
   // Listen for navigation messages from the embedded ERP iframe
   useEffect(() => {
@@ -41,29 +50,66 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
     return () => window.removeEventListener("message", handleMsg);
   }, [onNavigate]);
 
-  // Check health of ERP server
-  const checkHealth = async () => {
+  // Check health of ERP server with automatic fallback between localhost and LAN IP
+  const checkHealth = async (overrideUrl?: string) => {
     setLoading(true);
-    try {
-      const res = await fetch(`${ERP_LOCAL_URL}/api/v1/health`, { signal: AbortSignal.timeout(4000) });
-      if (res.ok) {
-        const data = await res.json();
-        setServerOnline(true);
-        setMetrics(data);
-      } else {
-        setServerOnline(false);
-      }
-    } catch (err) {
-      // In web browser (cross-origin or offline), try reachability
+    const target = overrideUrl || activeUrl;
+
+    const testUrl = async (url: string) => {
       try {
-        await fetch(`${ERP_LOCAL_URL}/api/v1/health`, { mode: 'no-cors' });
-        setServerOnline(true);
-      } catch {
-        setServerOnline(false);
+        const res = await fetch(`${url}/api/v1/health`, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+          const data = await res.json();
+          return { ok: true, data };
+        }
+      } catch (e) {
+        try {
+          await fetch(`${url}/api/v1/health`, { mode: "no-cors" });
+          return { ok: true, data: null };
+        } catch {}
       }
-    } finally {
+      return { ok: false, data: null };
+    };
+
+    // 1. Try currently active URL
+    let check = await testUrl(target);
+    if (check.ok) {
+      if (target !== activeUrl) {
+        setActiveUrl(target);
+        localStorage.setItem("loveneet_erp_url", target);
+      }
+      setServerOnline(true);
+      if (check.data) setMetrics(check.data);
       setLoading(false);
+      return;
     }
+
+    // 2. If localhost failed, try LAN URL (ideal for other PCs on network)
+    if (target.includes("localhost") || target.includes("127.0.0.1")) {
+      check = await testUrl(DEFAULT_LAN);
+      if (check.ok) {
+        setActiveUrl(DEFAULT_LAN);
+        localStorage.setItem("loveneet_erp_url", DEFAULT_LAN);
+        setServerOnline(true);
+        if (check.data) setMetrics(check.data);
+        setLoading(false);
+        return;
+      }
+    } else if (target === DEFAULT_LAN) {
+      // If LAN failed, check if running locally
+      check = await testUrl(DEFAULT_LOCAL);
+      if (check.ok) {
+        setActiveUrl(DEFAULT_LOCAL);
+        localStorage.setItem("loveneet_erp_url", DEFAULT_LOCAL);
+        setServerOnline(true);
+        if (check.data) setMetrics(check.data);
+        setLoading(false);
+        return;
+      }
+    }
+
+    setServerOnline(false);
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -149,8 +195,24 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
                     background: serverOnline ? "#10b981" : "#ef4444"
                   }}
                 />
-                {serverOnline ? "ERP Active · Port 8080" : "Server Connecting / Standby"}
+                {serverOnline ? `ERP Active · ${activeUrl.replace("http://", "")}` : "Server Standby"}
               </span>
+              <button
+                type="button"
+                onClick={() => setShowConfig(!showConfig)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid #334155",
+                  color: "#94a3b8",
+                  borderRadius: "6px",
+                  padding: "2px 8px",
+                  fontSize: "11px",
+                  cursor: "pointer"
+                }}
+                title="Change Server Host / Port"
+              >
+                ⚙ Server IP
+              </button>
             </div>
             <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#94a3b8" }}>
               Multi-company enterprise system for PAN HOMES, ESR & future companies · Dynamic Matrix Dashboard · Dispatches · 6-Hourly Automated Backups
@@ -201,7 +263,7 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
           </button>
 
           <a
-            href={ERP_LOCAL_URL}
+            href={activeUrl}
             target="_blank"
             rel="noreferrer"
             className="primary-btn"
@@ -218,6 +280,151 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
           </a>
         </div>
       </div>
+
+      {/* Server IP Configuration Bar */}
+      {showConfig && (
+        <div
+          style={{
+            background: "#0f172a",
+            border: "1px solid #334155",
+            borderRadius: "10px",
+            padding: "12px 18px",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            flexWrap: "wrap",
+            fontSize: "12px",
+            color: "#e2e8f0"
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>ERP Server Address:</span>
+          <input
+            type="text"
+            value={customHost}
+            onChange={(e) => setCustomHost(e.target.value)}
+            placeholder="http://192.168.1.63:8080"
+            style={{
+              background: "#1e293b",
+              border: "1px solid #475569",
+              borderRadius: "6px",
+              padding: "6px 12px",
+              color: "#ffffff",
+              fontSize: "12px",
+              width: "240px"
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              checkHealth(customHost);
+              setShowConfig(false);
+            }}
+            style={{
+              background: "#2563eb",
+              border: "none",
+              color: "#ffffff",
+              borderRadius: "6px",
+              padding: "6px 14px",
+              fontSize: "12px",
+              fontWeight: 600,
+              cursor: "pointer"
+            }}
+          >
+            Connect
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCustomHost(DEFAULT_LOCAL);
+              checkHealth(DEFAULT_LOCAL);
+              setShowConfig(false);
+            }}
+            style={{
+              background: "#334155",
+              border: "none",
+              color: "#cbd5e1",
+              borderRadius: "6px",
+              padding: "6px 10px",
+              fontSize: "11px",
+              cursor: "pointer"
+            }}
+          >
+            Use Localhost (8080)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCustomHost(DEFAULT_LAN);
+              checkHealth(DEFAULT_LAN);
+              setShowConfig(false);
+            }}
+            style={{
+              background: "#334155",
+              border: "none",
+              color: "#cbd5e1",
+              borderRadius: "6px",
+              padding: "6px 10px",
+              fontSize: "11px",
+              cursor: "pointer"
+            }}
+          >
+            Use Office LAN (192.168.1.63)
+          </button>
+        </div>
+      )}
+
+      {/* Standby Banner if server not running */}
+      {!serverOnline && (
+        <div
+          style={{
+            background: "rgba(220, 38, 38, 0.12)",
+            border: "1px solid rgba(239, 68, 68, 0.4)",
+            borderRadius: "10px",
+            padding: "14px 18px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "12px",
+            color: "#fca5a5",
+            fontSize: "13px"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <AlertCircle size={20} color="#ef4444" style={{ flexShrink: 0 }} />
+            <div>
+              <strong>ERP Server Standby:</strong> The ERP backend at{" "}
+              <code style={{ background: "#1e1b2e", padding: "2px 6px", borderRadius: "4px", color: "#f87171" }}>
+                {activeUrl}
+              </code>{" "}
+              is currently offline or unreachable.
+              <div style={{ fontSize: "11px", color: "#e2e8f0", marginTop: "3px" }}>
+                👉 On the host PC (Machine28 / Server), double-click <strong>Start Loveneet Business System.bat</strong> on the Desktop to launch localhost and office LAN access.
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              onClick={() => checkHealth()}
+              style={{
+                background: "#2563eb",
+                border: "none",
+                color: "#ffffff",
+                padding: "6px 12px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer"
+              }}
+            >
+              <RefreshCw size={12} className={loading ? "spin" : ""} /> Retry Check
+            </button>
+          </div>
+        </div>
+      )}
 
       {exportNotice && (
         <div className="notice info" style={{ background: "#172554", borderColor: "#1d4ed8", color: "#93c5fd" }}>
