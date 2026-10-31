@@ -31,7 +31,7 @@ export default function BusinessSystemTool() {
   const checkHealth = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${ERP_LOCAL_URL}/health`, { signal: AbortSignal.timeout(3000) });
+      const res = await fetch(`${ERP_LOCAL_URL}/api/v1/health`, { signal: AbortSignal.timeout(4000) });
       if (res.ok) {
         const data = await res.json();
         setServerOnline(true);
@@ -40,9 +40,9 @@ export default function BusinessSystemTool() {
         setServerOnline(false);
       }
     } catch (err) {
-      // In web browser (cross-origin without CORS or offline), try testing reachability
+      // In web browser (cross-origin or offline), try reachability
       try {
-        await fetch(`${ERP_LOCAL_URL}/api/v1/companies`, { mode: 'no-cors' });
+        await fetch(`${ERP_LOCAL_URL}/api/v1/health`, { mode: 'no-cors' });
         setServerOnline(true);
       } catch {
         setServerOnline(false);
@@ -283,6 +283,8 @@ export default function BusinessSystemTool() {
             id="erp-iframe"
             src={ERP_LOCAL_URL}
             title="Loveneet Business System"
+            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"
+            allow="clipboard-write; fullscreen"
             style={{
               width: "100%",
               height: "100%",
