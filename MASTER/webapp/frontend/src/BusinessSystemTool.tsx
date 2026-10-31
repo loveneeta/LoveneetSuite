@@ -13,10 +13,11 @@ import {
   CheckCircle2,
   AlertCircle,
   FileSpreadsheet,
-  Download
+  Download,
+  ArrowLeft
 } from "lucide-react";
 
-export default function BusinessSystemTool() {
+export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageId: string) => void }) {
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
   const [metrics, setMetrics] = useState<any>(null);
   const [viewMode, setViewMode] = useState<"embedded" | "cards">("embedded");
@@ -26,6 +27,19 @@ export default function BusinessSystemTool() {
 
   const ERP_LOCAL_URL = "http://localhost:8080";
   const ERP_LAN_URL = "http://192.168.1.63:8080";
+
+  // Listen for navigation messages from the embedded ERP iframe
+  useEffect(() => {
+    const handleMsg = (e: MessageEvent) => {
+      if (e.data && e.data.type === "LOVENEET_NAV" && e.data.page) {
+        if (onNavigate) {
+          onNavigate(e.data.page);
+        }
+      }
+    };
+    window.addEventListener("message", handleMsg);
+    return () => window.removeEventListener("message", handleMsg);
+  }, [onNavigate]);
 
   // Check health of ERP server
   const checkHealth = async () => {
@@ -145,7 +159,31 @@ export default function BusinessSystemTool() {
         </div>
 
         {/* View Switcher & Action Links */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          {onNavigate && (
+            <button
+              type="button"
+              className="primary-btn"
+              style={{
+                background: "#1e293b",
+                border: "1px solid #475569",
+                color: "#f1f5f9",
+                padding: "8px 14px",
+                fontSize: "12px",
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer"
+              }}
+              onClick={() => onNavigate("dashboard")}
+              title="Return to Loveneet Suite Overview / All Tools"
+            >
+              <ArrowLeft size={14} />
+              ← Back to Suite Overview
+            </button>
+          )}
+
           <button
             type="button"
             className="primary-btn"
