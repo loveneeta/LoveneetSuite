@@ -43,10 +43,10 @@ export function AdminConsole(){
  const {notice,setNotice}=useNotice();
  const load=async()=>{try{const [d,u]=await Promise.all([call("/api/auth/admin/overview"),call("/api/auth/admin/users")]);setData(d);setUsers(u.users||[]);setLabels(d.labels);setWm(d.watermark);}catch(e:any){setNotice({type:"error",text:e.message});}};
  useEffect(()=>{load();},[]);
- const save=async(fn:()=>Promise<any>,msg:string)=>{setBusy(true);setNotice(null);try{await fn();setNotice({type:"success",text:msg});await load();}catch(e:any){setNotice({type:"error",text:e.message});}finally{setBusy(false);}};
+ const save=async(fn:()=>Promise<any>,msg:string)=>{setBusy(true);setNotice(null);try{await fn();setNotice({type:"success",text:msg});await load();return true;}catch(e:any){setNotice({type:"error",text:e.message});return false;}finally{setBusy(false);}};
  const toggle=(arr:string[],id:string)=>arr.includes(id)?arr.filter(x=>x!==id):[...arr,id];
  const createCompany=async(e:any)=>{e.preventDefault();await save(async()=>{const d=await call("/api/auth/admin/companies","POST",company);setNewPassword(d.temporary_password);setCompany({name:"",admin_name:"",admin_email:"",plan_id:"",max_users:6,tool_access:[]});return d;},"Company created. Copy the temporary password shown below.");};
- const createPlan=async(e:any)=>{e.preventDefault();await save(()=>call(editingPlan?"/api/auth/admin/plans/"+editingPlan:"/api/auth/admin/plans",editingPlan?"PATCH":"POST",plan),editingPlan?"Subscription plan updated.":"Subscription plan created.");setPlan({name:"",description:"",price:0,currency:"INR",duration_days:30,max_users:6,tool_access:[],active:true});setEditingPlan(null);};
+ const createPlan=async(e:any)=>{e.preventDefault();const saved=await save(()=>call(editingPlan?"/api/auth/admin/plans/"+editingPlan:"/api/auth/admin/plans",editingPlan?"PATCH":"POST",plan),editingPlan?"Subscription plan updated.":"Subscription plan created.");if(saved){setPlan({name:"",description:"",price:0,currency:"INR",duration_days:30,max_users:6,tool_access:[],active:true});setEditingPlan(null);}};
  const saveLabels=()=>save(()=>call("/api/auth/admin/tool-labels","PUT",{labels}),"Tool names updated across the platform.");
  const saveWm=()=>save(()=>call("/api/auth/admin/watermark","PUT",wm),"Mandatory output watermark settings saved.");
  const updateCo=(c:any,patch:any)=>save(()=>call("/api/auth/admin/companies/"+c.id,"PATCH",patch),"Company settings updated.");
