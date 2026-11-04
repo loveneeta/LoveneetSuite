@@ -68,8 +68,8 @@ def user_token(t):
  with db() as c:
   u=c.execute("SELECT * FROM users WHERE id=? AND status='active'",(p["sub"],)).fetchone()
   if u and u["company_id"]:
-   co=c.execute("SELECT status FROM companies WHERE id=?",(u["company_id"],)).fetchone()
-   if not co or co["status"]!="active":return None
+   co=c.execute("SELECT status,plan_expires_at FROM companies WHERE id=?",(u["company_id"],)).fetchone()
+   if not co or co["status"]!="active" or (co["plan_expires_at"] and datetime.fromisoformat(co["plan_expires_at"]) < datetime.now(timezone.utc)):return None
   return u
 def current(r):
  u=getattr(r.state,"auth_user",None)
@@ -135,8 +135,9 @@ def login(x:Login,r:Request,res:Response):
   u=c.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE",(x.email,)).fetchone()
   if not u or u["status"]!="active" or not checkpw(x.password,u["password_hash"]):raise HTTPException(401,"Email or password is incorrect.")
   if u["company_id"]:
-   co=c.execute("SELECT status FROM companies WHERE id=?",(u["company_id"],)).fetchone()
+   co=c.execute("SELECT status,plan_expires_at FROM companies WHERE id=?",(u["company_id"],)).fetchone()
    if not co or co["status"]!="active":raise HTTPException(403,"Company account is suspended.")
+   if co["plan_expires_at"] and datetime.fromisoformat(co["plan_expires_at"]) < datetime.now(timezone.utc):raise HTTPException(403,"Company subscription has expired. Contact the Super Admin.")
   c.execute("UPDATE users SET last_login=? WHERE id=?",(now(),u["id"]));u=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
  attempts[ip]=[];res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite="lax",max_age=SESSION_SECONDS,path="/")
  return {"user":public(u)}
@@ -216,16 +217,16 @@ def create_company(x:Company,r:Request):
  return {"company_id":cid,"company_name":x.name,"admin_email":x.admin_email,"temporary_password":pw}
 @router.patch("/admin/companies/{cid}")
 def update_company(cid:str,x:dict,r:Request):
- u=current(r);roles(u,"super_admin");allowed={"name","status","plan_id","max_users","tool_access"};v={k:z for k,z in x.items() if k in allowed}
+ u=current(r);roles(u,"super_admin");allowed={"name","status","plan_id","max_users","tool_access","plan_started_at","plan_expires_at"};v={k:z for k,z in x.items() if k in allowed}
  if not v:raise HTTPException(400,"No valid changes supplied.")
  if "status" in v and v["status"] not in {"active","suspended"}:raise HTTPException(400,"Invalid status.")
  if "tool_access" in v and any(t not in TOOLS for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
  if "max_users" in v and not 1<=int(v["max_users"])<=500:raise HTTPException(400,"Invalid user limit.")
  if v.get("plan_id"):
   with db() as c:
-   p=c.execute("SELECT max_users,tool_access FROM plans WHERE id=?",(v["plan_id"],)).fetchone()
+   p=c.execute("SELECT max_users,tool_access,duration_days FROM plans WHERE id=?",(v["plan_id"],)).fetchone()
   if not p:raise HTTPException(400,"Plan not found.")
-  v.setdefault("max_users",p["max_users"]);v.setdefault("tool_access",json.loads(p["tool_access"]))
+  v.setdefault("max_users",p["max_users"]);v.setdefault("tool_access",json.loads(p["tool_access"]));v["plan_started_at"]=now();v["plan_expires_at"]=(datetime.now(timezone.utc)+timedelta(days=p["duration_days"])).isoformat()
  with db() as c:
   if not c.execute("SELECT 1 FROM companies WHERE id=?",(cid,)).fetchone():raise HTTPException(404,"Company not found.")
   sets=[];vals=[]
@@ -333,6 +334,31 @@ def wm_bytes(data,filename,cfg,company,user):
    xy={"top-left":(12,12),"top-right":(max(12,im.width-w-12),12),"center":((im.width-w)//2,(im.height-h)//2),"bottom-left":(12,max(12,im.height-h-12))}.get(pos,(max(12,im.width-w-12),max(12,im.height-h-12)))
    alpha=int(255*cfg["opacity"]);d.text(xy,label,font=f,fill=(40,40,40,alpha),stroke_width=1,stroke_fill=(255,255,255,int(150*cfg["opacity"])))
    out=io.BytesIO();fmt={".jpg":"JPEG",".jpeg":"JPEG",".png":"PNG",".webp":"WEBP",".bmp":"BMP",".tif":"TIFF",".tiff":"TIFF"}[ext];im.convert("RGB" if fmt in {"JPEG","BMP"} else "RGBA").save(out,format=fmt);return out.getvalue()
+  if ext==".docx":
+   from docx import Document
+   doc=Document(io.BytesIO(data))
+   for section in doc.sections:
+    section.header.paragraphs[0].text=label
+    section.footer.paragraphs[0].text=label
+   out=io.BytesIO();doc.save(out);return out.getvalue()
+  if ext==".pptx":
+   from pptx import Presentation
+   from pptx.util import Inches,Pt
+   from pptx.dml.color import RGBColor
+   prs=Presentation(io.BytesIO(data))
+   for slide in prs.slides:
+    box=slide.shapes.add_textbox(Inches(.2),prs.slide_height-Inches(.35),prs.slide_width-Inches(.4),Inches(.25))
+    p=box.text_frame.paragraphs[0];p.text=label;p.font.size=Pt(9);p.font.color.rgb=RGBColor(125,125,125)
+   out=io.BytesIO();prs.save(out);return out.getvalue()
+  if ext in {".xlsx",".xlsm"}:
+   from openpyxl import load_workbook
+   book=load_workbook(io.BytesIO(data),keep_vba=ext==".xlsm")
+   for sheet in book.worksheets:
+    sheet.oddHeader.center.text=label;sheet.oddFooter.right.text="Loveneet Suite"
+   sheet=book.create_sheet("Document Watermark");sheet["A1"]=label
+   from openpyxl.styles import Font
+   sheet["A1"].font=Font(size=18,bold=True,color="777777")
+   out=io.BytesIO();book.save(out);return out.getvalue()
   if ext in {".txt",".md",".csv"}:return (label+"\n"+data.decode("utf-8",errors="replace")).encode()
   return data
  except Exception:raise
