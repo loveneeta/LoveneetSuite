@@ -1,3 +1,4 @@
+import { secureDownload } from "./services/secureDownload";
 import React, { useState, useEffect, useMemo } from "react";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
@@ -734,15 +735,8 @@ export default function ExcelToPptTool() {
       const blob = new Blob([buf], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Loveneet_Product_Catalogue_Sample_Template.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
-      setStatus("Downloaded sample Excel template with 3 embedded product images.");
+      await secureDownload(blob,"Loveneet_Product_Catalogue_Sample_Template.xlsx");
+      setStatus("Downloaded sample Excel template with 3 embedded product images and watermark.");
     } catch (err: any) {
       console.error("Error generating Excel template:", err);
       setStatus("Could not generate Excel template: " + (err.message || String(err)));
