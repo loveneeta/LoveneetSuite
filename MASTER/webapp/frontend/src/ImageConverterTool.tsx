@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { secureDownload } from "./services/secureDownload";
 import {
   Upload,
   Download,
