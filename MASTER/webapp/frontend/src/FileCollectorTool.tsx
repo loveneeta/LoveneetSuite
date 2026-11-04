@@ -23,18 +23,10 @@ import {
 } from "lucide-react";
 import JSZip from "jszip";
 import "./file-collector.css";
+import { secureDownload } from "./services/secureDownload";
 import { isDesktop, fileAdapter, storageAdapter } from "./services/platform";
 
-const saveAs = (blob: Blob, filename: string) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
+const saveAs = (blob: Blob, filename: string) => { void secureDownload(blob,filename).catch((e)=>window.alert(e.message||"Watermarking failed; download blocked.")); };
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
