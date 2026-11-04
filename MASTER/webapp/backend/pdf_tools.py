@@ -2,7 +2,7 @@ import io, json, re, shutil, subprocess, tempfile, zipfile
 from pathlib import Path
 from typing import Annotated
 import fitz
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Request
 from fastapi.responses import StreamingResponse
 from PIL import Image
 
@@ -39,7 +39,7 @@ def zip_response(files: list[tuple[str, bytes]], filename="pdf_output.zip"):
     return StreamingResponse(out,media_type="application/zip",headers={"Content-Disposition":f'attachment; filename="{filename}"'})
 
 @router.post("/api/pdf-tools/{tool}")
-async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], options: Annotated[str, Form()] = "{}"):
+async def pdf_tool(request: Request, tool: str, files: Annotated[list[UploadFile], File()], options: Annotated[str, Form()] = "{}"):
     allowed = {"merge","split","remove-pages","extract-pages","organize-pages","page-numbers","edit-pdf","scan-to-pdf","repair","compress","rotate","watermark","crop","unlock","protect","redact","compare","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","pdf-to-pdfa","sign","forms","html-to-pdf","scan-to-pdf"}
     if tool not in allowed: raise HTTPException(404,"Unknown PDF operation.")
     if tool in {"ai-summarizer","translate"}: raise HTTPException(501,"Local AI is not configured. No document has been uploaded to an external service.")
@@ -139,7 +139,12 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
         if tool=="protect":
             newpass=str(opt.get("newPassword",""))
             if len(newpass)<4: raise HTTPException(400,"Set a new password with at least 4 characters.")
-            return response(doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,owner_pw=newpass,user_pw=newpass,permissions=fitz.PDF_PERM_ACCESSIBILITY|fitz.PDF_PERM_PRINT,garbage=4,deflate=True),"protected.pdf")
+            from auth import watermark_download
+            user=request.state.auth_user
+            prewatermarked=watermark_download(doc.tobytes(garbage=4,deflate=True),"protected.pdf",user)
+            protected_doc=fitz.open(stream=prewatermarked,filetype="pdf")
+            secured=protected_doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,owner_pw=newpass,user_pw=newpass,permissions=fitz.PDF_PERM_ACCESSIBILITY|fitz.PDF_PERM_PRINT,garbage=4,deflate=True)
+            return StreamingResponse(io.BytesIO(secured),media_type="application/pdf",headers={"Content-Disposition":'attachment; filename="protected.pdf"',"X-Watermark-Applied":"1"})
         if tool in {"repair","compress"}:
             return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
         if tool=="page-numbers":
