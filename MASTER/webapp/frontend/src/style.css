@@ -10,3 +10,5 @@
 .status-dot.online { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2); }
 .top-status.syncing { border-color: #0369a1; color: #7dd3fc; }
 .status-dot.syncing { background: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2); }
+
+.auth-side-actions{display:grid;gap:4px;padding:10px 0;border-top:1px solid #202b40;border-bottom:1px solid #202b40;margin:10px 0}.auth-side-actions .nav-item{font-size:11px}.auth-side-actions .nav-item svg{flex:0 0 18px}
