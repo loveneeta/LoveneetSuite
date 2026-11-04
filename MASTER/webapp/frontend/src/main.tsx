@@ -15,7 +15,7 @@ import PptExcelTool from "./PptExcelTool";
 import FileCollectorTool from "./FileCollectorTool";
 import BusinessSystemTool from "./BusinessSystemTool";
 import PdfStudioTool from "./PdfStudioTool";
-import { LoginScreen, AdminConsole, CompanyConsole } from "./AuthPortal";
+import { LoginScreen, AdminConsole, CompanyConsole, PasswordChangeRequired } from "./AuthPortal";
 import { secureDownload } from "./services/secureDownload";
 import UserGuideModal from "./components/UserGuideModal";
 import { convertImagesLocally, organizeImagesLocally } from "./services/imageTools";
@@ -875,5 +875,6 @@ function App(){
  React.useEffect(()=>{fetch("/api/auth/me",{credentials:"include"}).then(r=>r.ok?r.json():null).then(d=>setUser(d?.user||null)).catch(()=>setUser(null)).finally(()=>setChecking(false));},[]);
  if(checking)return <div className="auth-screen"><div className="auth-brand"><div className="auth-logo">L.</div><div><b>LOVENEET SUITE</b><small>VERIFYING SECURE SESSION</small></div></div></div>;
  if(!user)return <LoginScreen onLogin={setUser}/>;
+ if(user.must_change_password)return <PasswordChangeRequired user={user} onComplete={setUser}/>;
  return <WorkspaceApp user={user} onLogout={async()=>{await fetch("/api/auth/logout",{method:"POST",credentials:"include"}).catch(()=>{});setUser(null);}}/>;
 }
