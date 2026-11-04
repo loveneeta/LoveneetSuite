@@ -430,7 +430,7 @@ export default function ImageConverterTool() {
           <p>
             Convert PDF documents and images directly to <strong>JPG, PNG, WEBP, BMP, and TIFF</strong> formats.
             Preserve authentic sRGB colours, crystal-sharp text at high DPI, and fine details while dramatically optimizing file sizes.
-            Runs 100% locally in your browser or desktop app with zero cloud uploads.
+            Image conversion runs locally in your browser or desktop app. Generated exports are sent to your Loveneet Suite backend for mandatory server-side watermarking before download.
           </p>
         </div>
         <div className="converter-hero-badge">
