@@ -4,10 +4,12 @@ from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 router=APIRouter(prefix="/api/auth",tags=["authentication"])
+output_router=APIRouter(tags=["output watermarking"])
 COOKIE="loveneet_session"; SESSION_SECONDS=43200
 TOOLS=["dashboard","pdf-studio","business-system","collector","convert","organize","ppt","pdf-excel","excel-ppt","ppt-excel"]+["pdf:"+x for x in ["merge","split","remove-pages","extract-pages","organize-pages","scan-to-pdf","compress","repair","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","html-to-pdf","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","rotate","watermark","page-numbers","crop","edit-pdf","redact","forms","sign","unlock","protect","compare","pdf-to-pdfa","ai-summarizer","translate"]]
 LABELS={x:x.replace("pdf:","").replace("-"," ").title() for x in TOOLS}
@@ -184,7 +186,7 @@ def reset(x:dict):
  return {"ok":True}
 @router.get("/tools")
 def tools(r:Request):
- u=current(r);labels=json.loads(setting("tool_labels",json.dumps(LABELS)));allowed=TOOLS if u["role"]=="super_admin" else access(u["company_id"])
+ u=current(r);labels=json.loads(setting("tool_labels",json.dumps(LABELS)));allowed=TOOLS if u["role"]=="super_admin" else [t for t in access(u["company_id"]) if t not in {"business-system","collector"}]
  return {"tools":[{"id":t,"name":labels.get(t,LABELS[t]),"allowed":u["role"]=="super_admin" or t in allowed} for t in TOOLS]}
 def company_obj(x):
  d=dict(x);d["tool_access"]=json.loads(d.get("tool_access") or "[]");d["watermark_enabled"]=bool(d.get("watermark_enabled",1));return d
@@ -202,7 +204,7 @@ def overview(r:Request):
 @router.post("/admin/companies")
 def create_company(x:Company,r:Request):
  u=current(r);roles(u,"super_admin")
- if x.status not in {"active","suspended"} or any(t not in TOOLS for t in x.tool_access):raise HTTPException(400,"Invalid company status or tool access.")
+ if x.status not in {"active","suspended"} or any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Invalid company status or tool access.")
  cid=uuid.uuid4().hex;slug="-".join(x.name.lower().split())[:80]+"-"+cid[:6];pw=temp_password()
  with db() as c:
   if c.execute("SELECT 1 FROM users WHERE email=? COLLATE NOCASE",(x.admin_email,)).fetchone():raise HTTPException(409,"Email already registered.")
@@ -220,7 +222,7 @@ def update_company(cid:str,x:dict,r:Request):
  u=current(r);roles(u,"super_admin");allowed={"name","status","plan_id","max_users","tool_access","plan_started_at","plan_expires_at"};v={k:z for k,z in x.items() if k in allowed}
  if not v:raise HTTPException(400,"No valid changes supplied.")
  if "status" in v and v["status"] not in {"active","suspended"}:raise HTTPException(400,"Invalid status.")
- if "tool_access" in v and any(t not in TOOLS for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
+ if "tool_access" in v and any(t not in TOOLS or t in {"business-system","collector"} for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
  if "max_users" in v and not 1<=int(v["max_users"])<=500:raise HTTPException(400,"Invalid user limit.")
  if v.get("plan_id"):
   with db() as c:
@@ -236,7 +238,7 @@ def update_company(cid:str,x:dict,r:Request):
 @router.post("/admin/plans")
 def create_plan(x:Plan,r:Request):
  u=current(r);roles(u,"super_admin")
- if any(t not in TOOLS for t in x.tool_access):raise HTTPException(400,"Unknown tool in plan.")
+ if any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool in plan.")
  pid=uuid.uuid4().hex
  with db() as c:
   try:c.execute("INSERT INTO plans(id,name,description,price,currency,duration_days,max_users,tool_access,active,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,x.name,x.description,x.price,x.currency,x.duration_days,x.max_users,json.dumps(x.tool_access),int(x.active),now()))
@@ -245,7 +247,7 @@ def create_plan(x:Plan,r:Request):
 @router.patch("/admin/plans/{pid}")
 def update_plan(pid:str,x:Plan,r:Request):
  u=current(r);roles(u,"super_admin")
- if any(t not in TOOLS for t in x.tool_access):raise HTTPException(400,"Unknown tool.")
+ if any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool.")
  with db() as c:
   cur=c.execute("UPDATE plans SET name=?,description=?,price=?,currency=?,duration_days=?,max_users=?,tool_access=?,active=? WHERE id=?",(x.name,x.description,x.price,x.currency,x.duration_days,x.max_users,json.dumps(x.tool_access),int(x.active),pid))
   if not cur.rowcount:raise HTTPException(404,"Plan not found.")
@@ -314,7 +316,7 @@ def wm_config(cid):
  g=wm_global()
  if cid:
   with db() as c:x=c.execute("SELECT name,watermark_enabled,watermark_text,watermark_position,watermark_opacity FROM companies WHERE id=?",(cid,)).fetchone()
-  if x:return {"enabled":g["enabled"] and bool(x["watermark_enabled"]),"text":x["watermark_text"] or g["text"],"position":x["watermark_position"] or g["position"],"opacity":float(x["watermark_opacity"] or g["opacity"]),"company":x["name"]}
+  if x:return {"enabled":g["enabled"] and bool(x["watermark_enabled"]),"text":g["text"],"position":g["position"],"opacity":g["opacity"],"company":x["name"]}
  return {**g,"company":"Loveneet Suite"}
 def wm_bytes(data,filename,cfg,company,user):
  if not cfg["enabled"] or not data:return data
@@ -391,6 +393,7 @@ class AuthMiddleware:
   if u["role"]!="super_admin":
    tool=None
    if path.startswith("/api/pdf-tools/"):tool="pdf:"+path.rsplit("/",1)[-1]
+   elif path.startswith("/api/collector/"):tool="collector"
    else:tool={"/api/convert":"convert","/api/organize":"organize","/api/ppt-export":"ppt"}.get(path)
    if tool:
     allowed=access(u["company_id"])
@@ -401,7 +404,7 @@ class AuthMiddleware:
 class WatermarkMiddleware:
  def __init__(self,app):self.app=app
  async def __call__(self,scope,receive,send):
-  if scope["type"]!="http" or not scope.get("path","").startswith("/api/") or scope["path"].startswith("/api/auth/"):return await self.app(scope,receive,send)
+  if scope["type"]!="http" or not scope.get("path","").startswith("/api/") or scope["path"].startswith("/api/auth/") or scope["path"]=="/api/output/watermark":return await self.app(scope,receive,send)
   u=scope.get("state",{}).get("auth_user")
   if not u:return await self.app(scope,receive,send)
   start=None;parts=[];total=0
@@ -429,3 +432,16 @@ class WatermarkMiddleware:
     if start:await send(start)
     await send({"type":"http.response.body","body":b"".join(parts)})
   await self.app(scope,receive,capture)
+
+
+@output_router.post("/api/output/watermark")
+async def watermark_client_output(file: UploadFile = File(...), request: Request = None):
+    u=current(request)
+    filename=Path(file.filename or "output.bin").name
+    data=await file.read(400*1024*1024+1)
+    if len(data)>400*1024*1024:raise HTTPException(413,"Output is too large for watermark processing.")
+    try:processed=watermark_download(data,filename,u)
+    except Exception:raise HTTPException(500,"Mandatory watermark failed. Output was not released.")
+    from mimetypes import guess_type
+    return StreamingResponse(io.BytesIO(processed),media_type=guess_type(filename)[0] or "application/octet-stream",
+        headers={"Content-Disposition":f'attachment; filename="{filename}"',"X-Watermark-Applied":"1"})
