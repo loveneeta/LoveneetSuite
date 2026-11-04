@@ -5,7 +5,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 router=APIRouter(prefix="/api/auth",tags=["authentication"])
 COOKIE="loveneet_session"; SESSION_SECONDS=43200
@@ -45,7 +45,7 @@ def secret():
 def b64(x): return base64.urlsafe_b64encode(x).rstrip(b"=").decode()
 def hashpw(p):
  salt=secrets.token_bytes(16); rounds=600000; d=hashlib.pbkdf2_hmac("sha256",p.encode(),salt,rounds)
- return f"pbkdf2_sha256\${rounds}\${b64(salt)}\${b64(d)}"
+ return "pbkdf2_sha256$"+str(rounds)+"$"+b64(salt)+"$"+b64(d)
 def checkpw(p,s):
  try:
   a,n,salt,w=s.split("$",3); d=hashlib.pbkdf2_hmac("sha256",p.encode(),base64.urlsafe_b64decode(salt+"==="),int(n)); return a=="pbkdf2_sha256" and hmac.compare_digest(b64(d),w)
@@ -93,11 +93,11 @@ def public(u):
 def temp_password():return secrets.token_urlsafe(16)+"aA1!"
 def setpw(c,uid,p,must=True):c.execute("UPDATE users SET password_hash=?,must_change_password=? WHERE id=?",(hashpw(p),int(must),uid))
 class Setup(BaseModel):
- setup_key:str;email:EmailStr;full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
+ setup_key:str;email:str=Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
 class Login(BaseModel):
  email:EmailStr;password:str=Field(min_length=1,max_length=200)
 class Company(BaseModel):
- name:str=Field(min_length=2,max_length=120);admin_name:str=Field(min_length=2,max_length=100);admin_email:EmailStr
+ name:str=Field(min_length=2,max_length=120);admin_name:str=Field(min_length=2,max_length=100);admin_email:str=Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
  plan_id:str|None=None;status:str="active";max_users:int=Field(default=6,ge=1,le=500);tool_access:list[str]=Field(default_factory=list)
 class Plan(BaseModel):
  name:str=Field(min_length=2,max_length=80);description:str="";price:float=Field(default=0,ge=0);currency:str="INR"
