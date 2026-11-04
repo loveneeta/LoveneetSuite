@@ -187,7 +187,8 @@ def reset(x:dict):
 @router.get("/tools")
 def tools(r:Request):
  u=current(r);labels=json.loads(setting("tool_labels",json.dumps(LABELS)));allowed=TOOLS if u["role"]=="super_admin" else [t for t in access(u["company_id"]) if t not in {"business-system","collector"}]
- return {"tools":[{"id":t,"name":labels.get(t,LABELS[t]),"allowed":u["role"]=="super_admin" or t in allowed} for t in TOOLS]}
+ has_pdf=any(t.startswith("pdf:") for t in allowed)
+ return {"tools":[{"id":t,"name":labels.get(t,LABELS[t]),"allowed":u["role"]=="super_admin" or t in allowed or (t=="pdf-studio" and has_pdf) or (t.startswith("pdf:") and "pdf-studio" in allowed)} for t in TOOLS]}
 def company_obj(x):
  d=dict(x);d["tool_access"]=json.loads(d.get("tool_access") or "[]");d["watermark_enabled"]=bool(d.get("watermark_enabled",1));return d
 def plan_obj(x):
