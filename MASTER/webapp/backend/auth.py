@@ -387,10 +387,13 @@ def watermark_download(data,filename,u):
  if not cfg["enabled"]:return data
  company=cfg["company"];name=u["full_name"]
  if filename.lower().endswith(".zip"):
-  src=zipfile.ZipFile(io.BytesIO(data));out=io.BytesIO()
+  src=zipfile.ZipFile(io.BytesIO(data));out=io.BytesIO();items=src.infolist()
+  if len(items)>10000 or sum(x.file_size for x in items)>400*1024*1024:raise ValueError("ZIP contents exceed watermark processing limits.")
   with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
-   for item in src.infolist():
-    if not item.is_dir():z.writestr(item.filename,wm_bytes(src.read(item.filename),item.filename,cfg,company,name))
+   for item in items:
+    if not item.is_dir():
+     if item.file_size>100*1024*1024:raise ValueError("An individual ZIP entry exceeds watermark processing limits.")
+     z.writestr(item.filename,wm_bytes(src.read(item.filename),item.filename,cfg,company,name))
   return out.getvalue()
  return wm_bytes(data,filename,cfg,company,name)
 class AuthMiddleware:
