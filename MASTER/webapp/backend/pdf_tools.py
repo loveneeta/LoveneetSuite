@@ -40,7 +40,7 @@ def zip_response(files: list[tuple[str, bytes]], filename="pdf_output.zip"):
 
 @router.post("/api/pdf-tools/{tool}")
 async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], options: Annotated[str, Form()] = "{}"):
-    allowed = {"merge","split","remove-pages","extract-pages","organize-pages","repair","compress","rotate","watermark","crop","unlock","protect","redact","compare","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","pdf-to-pdfa","sign","forms","html-to-pdf","scan-to-pdf"}
+    allowed = {"merge","split","remove-pages","extract-pages","organize-pages","page-numbers","edit-pdf","scan-to-pdf","repair","compress","rotate","watermark","crop","unlock","protect","redact","compare","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","pdf-to-pdfa","sign","forms","html-to-pdf","scan-to-pdf"}
     if tool not in allowed: raise HTTPException(404,"Unknown PDF operation.")
     if tool in {"ai-summarizer","translate"}: raise HTTPException(501,"Local AI is not configured. No document has been uploaded to an external service.")
     if not files: raise HTTPException(400,"Select at least one file.")
