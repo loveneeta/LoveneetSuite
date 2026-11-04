@@ -230,11 +230,13 @@ def update_company(cid:str,x:dict,r:Request):
  if "status" in v and v["status"] not in {"active","suspended"}:raise HTTPException(400,"Invalid status.")
  if "tool_access" in v and any(t not in TOOLS or t in {"business-system","collector"} for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
  if "max_users" in v and not 1<=int(v["max_users"])<=500:raise HTTPException(400,"Invalid user limit.")
- if v.get("plan_id"):
+ if "plan_id" in v and v["plan_id"]:
   with db() as c:
    p=c.execute("SELECT max_users,tool_access,duration_days FROM plans WHERE id=?",(v["plan_id"],)).fetchone()
   if not p:raise HTTPException(400,"Plan not found.")
-  v.setdefault("max_users",p["max_users"]);v.setdefault("tool_access",json.loads(p["tool_access"]));v["plan_started_at"]=now();v["plan_expires_at"]=(datetime.now(timezone.utc)+timedelta(days=p["duration_days"])).isoformat()
+  v["max_users"]=p["max_users"];v["tool_access"]=json.loads(p["tool_access"]);v["plan_started_at"]=now();v["plan_expires_at"]=(datetime.now(timezone.utc)+timedelta(days=p["duration_days"])).isoformat()
+ elif "plan_id" in v and v["plan_id"] is None:
+  v["plan_started_at"]=None;v["plan_expires_at"]=None
  with db() as c:
   if not c.execute("SELECT 1 FROM companies WHERE id=?",(cid,)).fetchone():raise HTTPException(404,"Company not found.")
   sets=[];vals=[]
