@@ -58,7 +58,7 @@ The output middleware blocks downloads if watermark processing fails. ZIP files 
 - Company account records, plan entitlements, member management and audit records are scoped by company ID.
 - Companies cannot administer another company's users or settings.
 - Business System ERP and File Collector remain Super Admin-only because the current ERP runs as a separate service on port 8080 and the collector can access server-side folders. Do not grant these to tenant companies until those services enforce tenant identity and server-side data boundaries.
-- Existing Business System ERP data is not migrated into tenant-specific databases by this authentication change.
+- Existing Business System ERP data is not migrated into tenant-specific databases by this authentication change. Direct exports inside the separate ERP UI may bypass this Suite's watermark middleware until that service is integrated.
 - Plans are assigned and managed by Super Admin; payment collection and automated billing are not included.
 
 ## Deployment requirements
