@@ -44,19 +44,20 @@ export default function PdfStudioTool({allowedTools}:{allowedTools?:string[]}){
  const [selected,setSelected]=useState("merge"),[files,setFiles]=useState<File[]>([]),[pages,setPages]=useState(""),[order,setOrder]=useState("1,2,3"),[angle,setAngle]=useState("90"),[scale,setScale]=useState("1.5"),[text,setText]=useState("CONFIDENTIAL"),[margin,setMargin]=useState("24"),[password,setPassword]=useState(""),[newPassword,setNewPassword]=useState(""),[busy,setBusy]=useState(false),[notice,setNotice]=useState<{type:string;message:string}|null>(null);
  const [authLabels,setAuthLabels]=useState<Record<string,string>>({});
  useEffect(()=>{fetch("/api/auth/tools",{credentials:"include"}).then(r=>r.ok?r.json():null).then(d=>{const labels:Record<string,string>={};(d?.tools||[]).forEach((x:any)=>{labels[x.id]=x.name;});setAuthLabels(labels);}).catch(()=>{});},[]);
- const visibleTools=tools.map(t=>({...t,name:authLabels["pdf:"+t.id]||t.name})).filter(t=>!allowedTools||allowedTools.includes("pdf-studio")||allowedTools.includes("pdf:"+t.id));
+ const visibleTools=tools.map(t=>({...t,name:authLabels["pdf:"+t.id]||t.name})).filter(t=>!allowedTools?.length||allowedTools.includes("pdf:"+t.id));
  useEffect(()=>{if(visibleTools.length&&!visibleTools.some(t=>t.id===selected))setSelected(visibleTools[0].id);},[visibleTools,selected]);
- const tool=visibleTools.find(t=>t.id===selected)||visibleTools[0];
- const pickAccept=tool.accept || ".pdf,application/pdf";
+ const tool=visibleTools.find(t=>t.id===selected)||visibleTools[0]||null;
+ const pickAccept=tool?.accept || ".pdf,application/pdf";
  const choose=(id:string)=>{setSelected(id);setFiles([]);setNotice(null);setPages("");};
- const run=async()=>{if(tool.disabled){setNotice({type:"error",message:"This feature is not enabled in the local-only edition."});return;}if(!files.length){setNotice({type:"error",message:"Select the required file(s) first."});return;}
+ const run=async()=>{if(!tool){setNotice({type:"error",message:"No PDF tools are available for this account."});return;}if(tool.disabled){setNotice({type:"error",message:"This feature is not enabled in the local-only edition."});return;}if(!files.length){setNotice({type:"error",message:"Select the required file(s) first."});return;}
   setBusy(true);setNotice(null);
   try{const fd=new FormData();files.forEach(f=>fd.append("files",f));const options:any={pages,order,angle:Number(angle),scale:Number(scale),text,margin:Number(margin),password,newPassword};fd.append("options",JSON.stringify(options));
    const res=await fetch("/api/pdf-tools/"+selected,{method:"POST",body:fd});if(!res.ok){let message="PDF operation failed ("+res.status+")";try{message=(await res.json()).detail||message}catch{}throw new Error(message);}
    const blob=await res.blob();const disposition=res.headers.get("content-disposition")||"";const match=disposition.match(/filename="?([^";]+)"?/i);const filename=match?.[1]||selected+"_output.pdf";const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);setNotice({type:"success",message:"Completed. Your output download has started."});
   }catch(e:any){setNotice({type:"error",message:e.message||"Could not process this PDF."});}finally{setBusy(false);}
  };
- const fields=useMemo(()=>tool.fields||[],[tool]);
+ const fields=useMemo(()=>tool?.fields||[],[tool]);
+ if(!tool)return <div className="pdfstudio"><p>No PDF tools are available for this account.</p></div>;
  return <div className="pdfstudio">
   <div className="pdfstudio-intro"><div><span className="pdfstudio-kicker"><ShieldCheck size={14}/> LOCAL DOCUMENT WORKSPACE</span><h2>PDF Studio</h2><p>PDF processing runs on your Loveneet Suite server. Files are not sent to online PDF services.</p></div><div className="pdfstudio-local"><LockKeyhole size={18}/><span><b>Local-only processing</b><small>No cloud PDF APIs</small></span></div></div>
   {notice&&<div className={"pdfstudio-notice "+notice.type}><span>{notice.type==="success"?<CheckCircle2 size={18}/>:<AlertCircle size={18}/>}</span>{notice.message}<button onClick={()=>setNotice(null)}><X size={16}/></button></div>}

@@ -1,7 +1,9 @@
 export async function secureDownload(blob: Blob, filename: string): Promise<void> {
   const form = new FormData();
   form.append("file", blob, filename);
-  const response = await fetch("/api/output/watermark", {
+  const configuredBackendUrl = localStorage.getItem("loveneet_erp_url");
+  const backendBaseUrl = (configuredBackendUrl || (window.location.protocol === "file:" ? "http://localhost:8080" : window.location.origin)).replace(/\/+$/, "");
+  const response = await fetch(`${backendBaseUrl}/api/output/watermark`, {
     method: "POST",
     body: form,
     credentials: "include"

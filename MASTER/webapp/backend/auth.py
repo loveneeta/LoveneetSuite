@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response, UploadFile, File
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 router=APIRouter(prefix="/api/auth",tags=["authentication"])
@@ -105,7 +106,7 @@ def setpw(c,uid,p,must=True):c.execute("UPDATE users SET password_hash=?,must_ch
 class Setup(BaseModel):
  setup_key:str;email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$");full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
 class Login(BaseModel):
- email:EmailStr;password:str=Field(min_length=1,max_length=200)
+ email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$");password:str=Field(min_length=1,max_length=200)
 class Company(BaseModel):
  name:str=Field(min_length=2,max_length=120);admin_name:str=Field(min_length=2,max_length=100);admin_email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$")
  plan_id:str|None=None;status:str="active";max_users:int=Field(default=6,ge=1,le=500);tool_access:list[str]=Field(default_factory=list)
@@ -116,7 +117,7 @@ class Wm(BaseModel):
  enabled:bool=True;text:str=Field(default="{company} · Loveneet Suite",min_length=1,max_length=180);position:str="bottom-right";opacity:float=Field(default=.35,ge=.05,le=1)
 class Labels(BaseModel):labels:dict[str,str]
 class Password(BaseModel):current_password:str;new_password:str=Field(min_length=12,max_length=200)
-class Member(BaseModel):full_name:str=Field(min_length=2,max_length=100);email:EmailStr
+class Member(BaseModel):full_name:str=Field(min_length=2,max_length=100);email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$")
 class Status(BaseModel):status:str
 class PlanChange(BaseModel):plan_id:str;note:str=Field(default="",max_length=500)
 class Reset(BaseModel):new_password:str|None=Field(default=None,min_length=12,max_length=200)
@@ -150,8 +151,11 @@ def login(x:Login,r:Request,res:Response):
  attempts[ip]=[];res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
  return {"user":public(u)}
 @router.post("/logout")
-def logout(res:Response):
- res.delete_cookie(COOKIE,path="/",httponly=True,samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());return {"ok":True}
+def logout(r:Request,res:Response):
+ u=getattr(r.state,"auth_user",None)
+ if u:
+  with db() as c:c.execute("UPDATE users SET session_version=session_version+1 WHERE id=?",(u["id"],))
+ res.delete_cookie(COOKIE,path="/",httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());return {"ok":True}
 @router.get("/me")
 def me(r:Request):return {"user":public(current(r))}
 @router.post("/change-password")
@@ -396,8 +400,8 @@ def wm_bytes(data,filename,cfg,company,user):
    from docx import Document
    doc=Document(io.BytesIO(data))
    for section in doc.sections:
-    section.header.paragraphs[0].text=label
-    section.footer.paragraphs[0].text=label
+    section.header.add_paragraph(label)
+    section.footer.add_paragraph(label)
    out=io.BytesIO();doc.save(out);return out.getvalue()
   if ext==".pptx":
    from pptx import Presentation
@@ -422,8 +426,12 @@ def wm_bytes(data,filename,cfg,company,user):
    if isinstance(value,dict):value["_watermark"]=label
    else:value={"_watermark":label,"data":value}
    return json.dumps(value,ensure_ascii=False,indent=2).encode("utf-8")
-  if ext in {".txt",".md",".csv"}:return (label+"\n"+data.decode("utf-8",errors="replace")).encode()
-  return data
+  if ext==".csv":
+   text=data.decode("utf-8",errors="replace")
+   separator="" if not text or text.endswith(("\n","\r")) else "\n"
+   return (text+separator+"# Watermark: "+label+"\n").encode("utf-8")
+  if ext in {".txt",".md"}:return (label+"\n"+data.decode("utf-8",errors="replace")).encode()
+  raise ValueError("Mandatory watermarking is not supported for this file type.")
  except Exception:raise
 def watermark_download(data,filename,u):
  cfg=wm_config(u["company_id"])
@@ -446,7 +454,7 @@ class AuthMiddleware:
   public=path in {"/api/health","/api/auth/status","/api/auth/setup","/api/auth/login","/api/auth/forgot-password","/api/auth/reset-password"}
   if scope["type"]!="http" or not path.startswith("/api/") or public:return await self.app(scope,receive,send)
   headers={k.decode().lower():v.decode() for k,v in scope.get("headers",[])};t=None
-  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","true").lower()!="true":
+  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","false").lower()!="true":
    origin=headers.get("origin")
    if origin:
     proto=headers.get("x-forwarded-proto",scope.get("scheme","http")).split(",")[0].strip()
@@ -513,7 +521,7 @@ class WatermarkMiddleware:
    disp=headers.get("content-disposition","")
    if disp and headers.get("x-watermark-applied")!="1" and (start or {}).get("status",200)<400:
     m=re.search(r'filename="?([^";]+)',disp,re.I);filename=m.group(1) if m else "output.bin"
-    try:data=watermark_download(b"".join(parts),filename,u)
+    try:data=await run_in_threadpool(watermark_download,b"".join(parts),filename,u)
     except Exception:
      err=b'{"detail":"Mandatory watermark failed. Download blocked."}'
      await send({"type":"http.response.start","status":500,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(err)).encode())]});await send({"type":"http.response.body","body":err});return
@@ -531,7 +539,7 @@ async def watermark_client_output(request: Request, file: UploadFile = File(...)
     filename=Path(file.filename or "output.bin").name
     data=await file.read(400*1024*1024+1)
     if len(data)>400*1024*1024:raise HTTPException(413,"Output is too large for watermark processing.")
-    try:processed=watermark_download(data,filename,u)
+    try:processed=await run_in_threadpool(watermark_download,data,filename,u)
     except Exception:raise HTTPException(500,"Mandatory watermark failed. Output was not released.")
     from mimetypes import guess_type
     return StreamingResponse(io.BytesIO(processed),media_type=guess_type(filename)[0] or "application/octet-stream",

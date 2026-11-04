@@ -45,7 +45,7 @@ interface ImageFileInfo {
   totalPages?: number;
 }
 
-const saveAs = (blob: Blob, filename: string) => { void secureDownload(blob,filename).catch((e)=>window.alert(e.message||"Watermarking failed; download blocked.")); };
+const saveAs = (blob: Blob, filename: string): Promise<void> => secureDownload(blob,filename);
 
 export default function ImageConverterTool() {
   const [files, setFiles] = useState<ImageFileInfo[]>([]);
@@ -373,17 +373,15 @@ export default function ImageConverterTool() {
 
       if (results.length === 1) {
         // Single file: download directly without ZIP
-        saveAs(results[0].blob, results[0].targetFilename);
+        await saveAs(results[0].blob, results[0].targetFilename);
         setStatusMessage({
           type: "success",
           text: `Success! Converted "${results[0].targetFilename}" to ${formatLabel}. Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded directly.`
         });
       } else if (results.length === 2) {
         // 2 files: download both directly without ZIP
-        saveAs(results[0].blob, results[0].targetFilename);
-        setTimeout(() => {
-          saveAs(results[1].blob, results[1].targetFilename);
-        }, 350);
+        await saveAs(results[0].blob, results[0].targetFilename);
+        await saveAs(results[1].blob, results[1].targetFilename);
         setStatusMessage({
           type: "success",
           text: `Success! Converted 2 files to ${formatLabel} ("${results[0].targetFilename}", "${results[1].targetFilename}"). Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Both downloaded directly.`
@@ -391,7 +389,7 @@ export default function ImageConverterTool() {
       } else {
         // More than 2 files: package into ZIP
         const zipFilename = loadedPdfFiles.length > 0 ? "pdf_converted_images.zip" : "converted_images.zip";
-        saveAs(zipBlob, zipFilename);
+        await saveAs(zipBlob, zipFilename);
         setStatusMessage({
           type: "success",
           text: `Success! Converted ${results.length} files/pages to ${formatLabel}. Reduced total size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded as ${zipFilename}.`
@@ -430,7 +428,7 @@ export default function ImageConverterTool() {
           <p>
             Convert PDF documents and images directly to <strong>JPG, PNG, WEBP, BMP, and TIFF</strong> formats.
             Preserve authentic sRGB colours, crystal-sharp text at high DPI, and fine details while dramatically optimizing file sizes.
-            Runs 100% locally in your browser or desktop app with zero cloud uploads.
+            Conversion runs locally in your browser or desktop app. Exported files are sent to your Loveneet Suite backend for mandatory server-side watermarking.
           </p>
         </div>
         <div className="converter-hero-badge">
@@ -1056,7 +1054,7 @@ export default function ImageConverterTool() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => saveAs(previewResult.blob, previewResult.targetFilename)}
+                      onClick={() => { void saveAs(previewResult.blob, previewResult.targetFilename).catch((e) => window.alert(e.message || "Watermarking failed; download blocked.")); }}
                       style={{
                         background: "transparent",
                         border: "1px solid #253350",

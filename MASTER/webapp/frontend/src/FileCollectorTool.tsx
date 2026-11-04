@@ -26,7 +26,7 @@ import "./file-collector.css";
 import { secureDownload } from "./services/secureDownload";
 import { isDesktop, fileAdapter, storageAdapter } from "./services/platform";
 
-const saveAs = (blob: Blob, filename: string) => { void secureDownload(blob,filename).catch((e)=>window.alert(e.message||"Watermarking failed; download blocked.")); };
+const saveAs = (blob: Blob, filename: string): Promise<void> => secureDownload(blob,filename);
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -950,7 +950,7 @@ export default function FileCollectorTool() {
     });
 
     const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
-    saveAs(blob, "file_collector_compression_report.txt");
+    void saveAs(blob, "file_collector_compression_report.txt").catch((e)=>window.alert(e.message||"Watermarking failed; download blocked."));
   };
 
   // Browser Mode (Dropzone / webkitdirectory)
@@ -1096,13 +1096,13 @@ export default function FileCollectorTool() {
       }
 
       if (collectedList.length === 1) {
-        saveAs(collectedList[0].blob, collectedList[0].filename);
+        await saveAs(collectedList[0].blob, collectedList[0].filename);
       } else if (collectedList.length === 2) {
-        saveAs(collectedList[0].blob, collectedList[0].filename);
-        setTimeout(() => saveAs(collectedList[1].blob, collectedList[1].filename), 350);
+        await saveAs(collectedList[0].blob, collectedList[0].filename);
+        await saveAs(collectedList[1].blob, collectedList[1].filename);
       } else {
         const zipBlob = await zip.generateAsync({ type: "blob" });
-        saveAs(zipBlob, "Collected_Files.zip");
+        await saveAs(zipBlob, "Collected_Files.zip");
       }
 
       if (enableCompression) {
