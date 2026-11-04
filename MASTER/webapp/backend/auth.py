@@ -168,7 +168,7 @@ def forgot(x:dict):
  with db() as c:u=c.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE AND status='active'",(email,)).fetchone()
  if not u:return {"ok":True,"message":"If the account exists, reset instructions will be sent."}
  host=os.getenv("SMTP_HOST");sender=os.getenv("SMTP_FROM");base=os.getenv("PUBLIC_APP_URL","").rstrip("/")
- if not host or not sender or not base:return {"ok":True,"message":"Email reset is not configured. Contact your company administrator or Super Admin."}
+ if not host or not sender or not base:return {"ok":True,"message":"If the account exists, reset instructions will be sent. If you do not receive an email, contact your administrator."}
  tok=secrets.token_urlsafe(32)
  with db() as c:c.execute("INSERT INTO password_resets VALUES(?,?,?,?,0)",(uuid.uuid4().hex,u["id"],hashlib.sha256(tok.encode()).hexdigest(),time.time()+1800))
  from email.message import EmailMessage
@@ -178,7 +178,7 @@ def forgot(x:dict):
    if os.getenv("SMTP_STARTTLS","true").lower()=="true":s.starttls()
    if os.getenv("SMTP_USER"):s.login(os.getenv("SMTP_USER"),os.getenv("SMTP_PASSWORD",""))
    s.send_message(m)
- except Exception:raise HTTPException(503,"Reset email could not be sent. Contact administrator.")
+ except Exception:return {"ok":True,"message":"If the account exists, reset instructions will be sent. If you do not receive an email, contact your administrator."}
  return {"ok":True,"message":"If the account exists, reset instructions will be sent."}
 @router.post("/reset-password")
 def reset(x:dict):
@@ -283,8 +283,12 @@ def company_overview(r:Request):
  u=current(r);roles(u,"company_admin","member")
  with db() as c:
   co=c.execute("SELECT c.*,p.name plan_name FROM companies c LEFT JOIN plans p ON p.id=c.plan_id WHERE c.id=?",(u["company_id"],)).fetchone()
-  members=c.execute("SELECT id,email,full_name,role,status,last_login,created_at FROM users WHERE company_id=? ORDER BY created_at",(u["company_id"],)).fetchall()
-  logs=c.execute("SELECT action,detail,created_at FROM audit_logs WHERE company_id=? ORDER BY id DESC LIMIT 50",(u["company_id"],)).fetchall()
+  if u["role"]=="company_admin":
+   members=c.execute("SELECT id,email,full_name,role,status,last_login,created_at FROM users WHERE company_id=? ORDER BY created_at",(u["company_id"],)).fetchall()
+   logs=c.execute("SELECT action,detail,created_at FROM audit_logs WHERE company_id=? ORDER BY id DESC LIMIT 50",(u["company_id"],)).fetchall()
+  else:
+   members=c.execute("SELECT id,email,full_name,role,status,last_login,created_at FROM users WHERE id=?",(u["id"],)).fetchall()
+   logs=[]
  return {"company":company_obj(co),"members":[dict(x) for x in members],"logs":[dict(x) for x in logs]}
 @router.patch("/company/profile")
 def profile(x:dict,r:Request):
