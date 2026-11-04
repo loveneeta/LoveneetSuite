@@ -454,7 +454,7 @@ class AuthMiddleware:
   public=path in {"/api/health","/api/auth/status","/api/auth/setup","/api/auth/login","/api/auth/forgot-password","/api/auth/reset-password"}
   if scope["type"]!="http" or not path.startswith("/api/") or public:return await self.app(scope,receive,send)
   headers={k.decode().lower():v.decode() for k,v in scope.get("headers",[])};t=None
-  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","true").lower()!="true":
+  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","false").lower()!="true":
    origin=headers.get("origin")
    if origin:
     proto=headers.get("x-forwarded-proto",scope.get("scheme","http")).split(",")[0].strip()
