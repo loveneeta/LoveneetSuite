@@ -1247,8 +1247,8 @@ export default function PptExcelTool() {
         <span className="pptx-badge">
           <Sparkles size={13} /> 100% In-Browser Engine
         </span>
-        <span className="pptx-badge">
-          <ShieldCheck size={13} /> Zero Cloud Upload
+        <span className="pptx-badge" title="Workbook exports are sent to the Loveneet Suite backend for mandatory server-side watermarking.">
+          <ShieldCheck size={13} /> Server-Side Watermarking
         </span>
         <span className="pptx-badge">
           <Filter size={13} /> Auto-Excludes Corner Logos & Footers
