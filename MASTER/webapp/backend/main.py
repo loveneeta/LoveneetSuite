@@ -35,7 +35,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-EXTS = {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff"}
+EXTS = {".png",".jpg",".jpeg",".webp",".bmp",".tif",".tiff",".pdf"}
 
 @app.get("/api/health")
 def health(): return {"ok": True, "service": "Loveneet Suite"}
@@ -60,10 +60,28 @@ async def convert(files: Annotated[list[UploadFile], File()], output_format: Ann
         out = Path(tmp) / "converted"; out.mkdir(); used=set(); errors=[]; count=0
         for upload in files:
             name=safe_name(upload.filename or "image")
-            if Path(name).suffix.lower() not in EXTS: errors.append(name + ": unsupported format"); continue
+            suffix = Path(name).suffix.lower()
+            if suffix not in EXTS: errors.append(name + ": unsupported format"); continue
             try:
-                with Image.open(io.BytesIO(await upload.read())) as source:
-                    image=source.copy()
+                content = await upload.read()
+                images_to_save = []
+                if suffix == ".pdf":
+                    if fitz is None:
+                        errors.append(name + ": PyMuPDF not available on server")
+                        continue
+                    doc = fitz.open(stream=content, filetype="pdf")
+                    stem = Path(name).stem
+                    for pno in range(len(doc)):
+                        page = doc[pno]
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        page_suffix = f"_page_{pno+1:02d}" if len(doc) > 1 else ""
+                        images_to_save.append((f"{stem}{page_suffix}", img))
+                else:
+                    with Image.open(io.BytesIO(content)) as source:
+                        images_to_save.append((Path(name).stem, source.copy()))
+
+                for item_stem, image in images_to_save:
                     if width and height:
                         if width > 12000 or height > 12000 or width < 1 or height < 1: raise ValueError("Invalid dimensions")
                         image=image.resize((width,height), Image.Resampling.LANCZOS)
@@ -71,8 +89,9 @@ async def convert(files: Annotated[list[UploadFile], File()], output_format: Ann
                         if image.mode in ("RGBA","LA") or (image.mode=="P" and "transparency" in image.info):
                             rgba=image.convert("RGBA"); bg=Image.new("RGB",rgba.size,"white"); bg.paste(rgba,mask=rgba.getchannel("A")); image=bg
                         else: image=image.convert("RGB")
-                    ext=".jpg" if fmt in {"jpg","jpeg"} else "."+fmt; stem=Path(name).stem; target_name=stem+ext; n=1
-                    while target_name.casefold() in used: target_name=stem+"_"+str(n)+ext; n+=1
+                    ext=".jpg" if fmt in {"jpg","jpeg"} else "."+fmt
+                    target_name=item_stem+ext; n=1
+                    while target_name.casefold() in used: target_name=item_stem+"_"+str(n)+ext; n+=1
                     used.add(target_name.casefold()); opts={"quality":quality} if fmt in {"jpg","jpeg","webp"} else {}
                     image.save(out/target_name, format={"jpg":"JPEG","jpeg":"JPEG","tiff":"TIFF"}.get(fmt,fmt.upper()), **opts); count+=1
             except Exception as exc: errors.append(name + ": " + str(exc))

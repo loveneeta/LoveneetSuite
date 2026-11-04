@@ -163,12 +163,14 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
 
   convert: {
     id: "convert",
-    title: "Format-Aware Image Converter & Smart Compression",
+    title: "Format-Aware PDF & Image Converter",
     badge: "Offline Optimization",
-    tagline: "Lossless & format-aware image conversion with true sRGB color fidelity, target size search, and live before/after comparison.",
+    tagline: "Convert PDF documents and bulk images to JPG, PNG, WebP, BMP, and TIFF with true sRGB color fidelity, high DPI resolution, and smart compression.",
     overview: {
-      description: "Convert single images or bulk photo batches across JPG, PNG, WebP, BMP, and TIFF formats. Employs format-aware compression that protects sRGB color accuracy, embedded ICC profiles, dynamic range, and EXIF orientation while dramatically cutting file sizes. Features four intelligent optimization modes, aspect-ratio locked resizing, and a real-time side-by-side inspection view with 1:1 pixel zoom.",
+      description: "Convert PDF documents and single images or bulk photo batches across JPG, PNG, WebP, BMP, and TIFF formats. Automatically splits multi-page PDFs into high-resolution images rendered at your choice of 72, 150, 200, or 300 DPI. Employs format-aware compression that protects sRGB color accuracy, dynamic range, and sharp text while dramatically cutting file sizes. Features four intelligent optimization modes, aspect-ratio locked resizing, and a real-time side-by-side inspection view with 1:1 pixel zoom.",
       benefits: [
+        "PDF to Image Conversion: Render multi-page PDF documents into crisp individual JPG, PNG, WEBP, BMP, or TIFF images 100% offline.",
+        "Adjustable PDF Render DPI: Choose from 72 DPI (Draft), 150 DPI (Web & Screens), 200 DPI (Sharp Text - Recommended), or 300 DPI (Ultra Print Studio Quality).",
         "True Color Engine: Zero washed-out tones, color shifting, or banding. Preserves full sRGB profiles and EXIF orientation.",
         "Preserves Transparency: Maintains 32-bit transparent alpha channels for PNG and WebP, applying clean white backgrounds only when saving to JPEG.",
         "4 Optimization Modes: Balanced Quality (92% default), Target File Size (e.g. 500 KB bounded search), Percentage Reduction, or Exact Lossless Mode.",
@@ -177,6 +179,7 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
         "100% Offline-First: Executes entirely in your browser or desktop app with zero server calls, zero timeouts, and complete privacy."
       ],
       useCases: [
+        "Converting multi-page PDF contracts, catalogs, or invoices into crisp JPG, PNG, or WebP images.",
         "Compressing 5-15 MB master product photos down to ~500 KB for catalog, web, and presentation use without color distortion.",
         "Converting heavy uncompressed PNG, BMP, or TIFF files into modern high-efficiency WebP or JPEG.",
         "Bulk resizing product lines to standard heights while locking aspect ratios.",
@@ -184,9 +187,9 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
       ]
     },
     beforeYouStart: {
-      requiredInputs: ["One or more image files (JPG, PNG, WebP, BMP, TIFF, HEIC/HEIF)."],
-      supportedFormats: ["JPG / JPEG", "PNG", "WEBP", "BMP", "TIFF", "HEIC/HEIF."],
-      requiredStructure: ["Loose image files. Multiple files can be selected or dragged together."],
+      requiredInputs: ["One or more PDF documents (.pdf) or image files (JPG, PNG, WebP, BMP, TIFF, HEIC/HEIF)."],
+      supportedFormats: ["PDF (.pdf)", "JPG / JPEG", "PNG", "WEBP", "BMP", "TIFF", "HEIC/HEIF."],
+      requiredStructure: ["Loose PDF or image files. Multiple files can be selected or dragged together."],
       limitations: [
         "Target File Size mode uses a safe quality floor (45%) to guarantee images never suffer from severe compression artifacts.",
         "JPEG does not support alpha transparency; transparent PNG backgrounds are filled with pure white."
@@ -195,19 +198,19 @@ export const USER_GUIDES: Record<string, ToolUserGuide> = {
     stepByStep: [
       {
         stepNumber: 1,
-        title: "Choose Images",
-        instruction: "Drag and drop your images into the dropzone or click to browse. Selected images appear in the file list with thumbnail previews, dimensions, and sizes."
+        title: "Choose Files (PDF or Images)",
+        instruction: "Drag and drop your PDF documents or images into the dropzone or click to browse. You can toggle between 'All Images & PDF' and 'PDF to Image Mode'. Multi-page PDFs are automatically split into high-resolution pages."
       },
       {
         stepNumber: 2,
         title: "Select Output Format",
-        instruction: "Choose your target format (JPG, WebP, PNG, BMP, TIFF). WebP is recommended for modern web and catalog usage, offering superior compression and transparency.",
+        instruction: "Choose your target format (JPG, PNG, WebP, BMP, TIFF). JPG is optimal for documents and photographs, while PNG and WebP provide lossless rendering with alpha transparency.",
         tip: "Selecting PNG, BMP, or TIFF automatically selects Lossless Mode for exact pixel fidelity."
       },
       {
         stepNumber: 3,
-        title: "Select Optimization Mode",
-        instruction: "Pick your compression strategy:\n• Balanced Quality: Sets quality to 92% for optimal detail and compression.\n• Target File Size: Enter a target size in KB or MB (e.g. 500 KB).\n• Percentage Reduction: Select how much smaller you want the file (e.g. 50%).\n• Lossless Mode: Bit-perfect preservation."
+        title: "Configure PDF DPI & Optimization",
+        instruction: "For PDFs, select your desired render resolution (200 DPI recommended for sharp text, 300 DPI for print). Pick your compression strategy (Balanced Quality 92%, Target File Size, Percentage Reduction, or Lossless)."
       },
       {
         stepNumber: 4,

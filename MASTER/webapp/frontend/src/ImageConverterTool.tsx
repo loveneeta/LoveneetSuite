@@ -15,7 +15,9 @@ import {
   Lock,
   Unlock,
   Info,
-  RefreshCw
+  RefreshCw,
+  FileText,
+  FileCheck
 } from "lucide-react";
 import {
   ImageCompressionOptions,
@@ -24,12 +26,22 @@ import {
   convertImagesLocally,
   formatBytes
 } from "./services/imageTools";
+import {
+  renderPdfToImageFiles,
+  PdfExtractedPage,
+  PdfRenderOptions
+} from "./services/pdfToImage";
 
 interface ImageFileInfo {
   file: File;
   previewUrl: string;
   width: number;
   height: number;
+  isPdfPage?: boolean;
+  sourcePdfFile?: File;
+  sourcePdfName?: string;
+  pageNumber?: number;
+  totalPages?: number;
 }
 
 const saveAs = (blob: Blob, filename: string) => {
@@ -46,12 +58,27 @@ const saveAs = (blob: Blob, filename: string) => {
 export default function ImageConverterTool() {
   const [files, setFiles] = useState<ImageFileInfo[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
+  const [activeTab, setActiveTab] = useState<"all" | "pdf">("all");
+
+  // Output configuration
   const [outputFormat, setOutputFormat] = useState<"jpg" | "png" | "webp" | "bmp" | "tiff">("jpg");
   const [mode, setMode] = useState<"balanced" | "target" | "percentage" | "lossless">("balanced");
   const [quality, setQuality] = useState<number>(92);
   const [targetSize, setTargetSize] = useState<number>(500);
   const [targetUnit, setTargetUnit] = useState<"KB" | "MB">("KB");
   const [percentReduction, setPercentReduction] = useState<number>(50);
+
+  // PDF-specific options
+  const [pdfDpi, setPdfDpi] = useState<number>(200);
+  const [pageRange, setPageRange] = useState<string>("all");
+  const [isExtractingPdf, setIsExtractingPdf] = useState<boolean>(false);
+  const [pdfExtractionProgress, setPdfExtractionProgress] = useState<{
+    current: number;
+    total: number;
+    message: string;
+    percent: number;
+  } | null>(null);
+  const [loadedPdfFiles, setLoadedPdfFiles] = useState<File[]>([]);
 
   // Resizing options (Default: OFF, aspect ratio lock ON)
   const [enableResize, setEnableResize] = useState<boolean>(false);
@@ -71,17 +98,57 @@ export default function ImageConverterTool() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Read dimensions when files are selected
+  // Extract PDF pages helper
+  const processPdfFile = async (pdfFile: File, dpi: number, range: string): Promise<ImageFileInfo[]> => {
+    const extractedPages: PdfExtractedPage[] = await renderPdfToImageFiles(pdfFile, {
+      dpi,
+      pageRange: range,
+      onProgress: (p) => setPdfExtractionProgress(p)
+    });
+
+    return extractedPages.map((page) => ({
+      file: page.file,
+      previewUrl: page.previewUrl,
+      width: page.width,
+      height: page.height,
+      isPdfPage: true,
+      sourcePdfFile: pdfFile,
+      sourcePdfName: page.sourcePdfName,
+      pageNumber: page.pageNumber,
+      totalPages: page.totalPages
+    }));
+  };
+
+  // Read dimensions when files are selected or dropped
   const handleFilesAdded = async (newFiles: FileList | File[]) => {
     setStatusMessage(null);
-    const addedList: ImageFileInfo[] = [];
+    const regularImages: File[] = [];
+    const pdfFiles: File[] = [];
 
     for (let i = 0; i < newFiles.length; i++) {
       const file = newFiles[i];
-      if (!file.type.startsWith("image/") && !/\.(jpe?g|png|webp|bmp|tiff?|heic|heif)$/i.test(file.name)) {
-        continue;
-      }
+      const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+      const isImg = file.type.startsWith("image/") || /\.(jpe?g|png|webp|bmp|tiff?|heic|heif)$/i.test(file.name);
 
+      if (isPdf) {
+        pdfFiles.push(file);
+      } else if (isImg) {
+        regularImages.push(file);
+      }
+    }
+
+    if (pdfFiles.length === 0 && regularImages.length === 0) {
+      setStatusMessage({
+        type: "error",
+        text: "Unsupported file type. Please select PDF documents or images (JPG, PNG, WEBP, BMP, TIFF, HEIC)."
+      });
+      return;
+    }
+
+    const addedList: ImageFileInfo[] = [];
+
+    // Process regular images
+    for (const file of regularImages) {
       const previewUrl = URL.createObjectURL(file);
       const dims = await new Promise<{ width: number; height: number }>((resolve) => {
         const img = new Image();
@@ -94,15 +161,78 @@ export default function ImageConverterTool() {
         file,
         previewUrl,
         width: dims.width,
-        height: dims.height
+        height: dims.height,
+        isPdfPage: false
       });
     }
 
+    // Process PDF files
+    if (pdfFiles.length > 0) {
+      setIsExtractingPdf(true);
+      setLoadedPdfFiles((prev) => [...prev, ...pdfFiles]);
+
+      try {
+        for (const pdf of pdfFiles) {
+          const pdfPages = await processPdfFile(pdf, pdfDpi, pageRange);
+          addedList.push(...pdfPages);
+        }
+      } catch (err: any) {
+        setStatusMessage({
+          type: "error",
+          text: `PDF extraction error: ${err.message || "Failed to render PDF pages."}`
+        });
+      } finally {
+        setIsExtractingPdf(false);
+        setPdfExtractionProgress(null);
+      }
+    }
+
     if (addedList.length > 0) {
-      setFiles((prev) => [...prev, ...addedList]);
+      setFiles((prev) => {
+        const next = [...prev, ...addedList];
+        return next;
+      });
       if (files.length === 0) {
         setSelectedIndex(0);
       }
+      setStatusMessage({
+        type: "success",
+        text: `Added ${addedList.length} ${addedList.length === 1 ? "item" : "items"}${pdfFiles.length > 0 ? ` (rendered from ${pdfFiles.length} PDF)` : ""}. Choose your output format and compression settings below.`
+      });
+    }
+  };
+
+  // Re-render loaded PDF pages if DPI or page range changes
+  const handleRerenderPdfs = async (newDpi: number) => {
+    if (loadedPdfFiles.length === 0) return;
+
+    setIsExtractingPdf(true);
+    setStatusMessage(null);
+    try {
+      const nonPdfFiles = files.filter((f) => !f.isPdfPage);
+      // Revoke old PDF page preview URLs
+      files.filter((f) => f.isPdfPage).forEach((f) => URL.revokeObjectURL(f.previewUrl));
+
+      const reRenderedPages: ImageFileInfo[] = [];
+      for (const pdf of loadedPdfFiles) {
+        const pages = await processPdfFile(pdf, newDpi, pageRange);
+        reRenderedPages.push(...pages);
+      }
+
+      setFiles([...nonPdfFiles, ...reRenderedPages]);
+      setSelectedIndex(0);
+      setStatusMessage({
+        type: "success",
+        text: `Re-rendered ${reRenderedPages.length} PDF pages at ${newDpi} DPI.`
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        type: "error",
+        text: `Failed to re-render PDF: ${err.message}`
+      });
+    } finally {
+      setIsExtractingPdf(false);
+      setPdfExtractionProgress(null);
     }
   };
 
@@ -121,6 +251,7 @@ export default function ImageConverterTool() {
   const handleClearAll = () => {
     files.forEach((f) => URL.revokeObjectURL(f.previewUrl));
     setFiles([]);
+    setLoadedPdfFiles([]);
     setSelectedIndex(0);
     setPreviewResult(null);
     setStatusMessage(null);
@@ -226,7 +357,7 @@ export default function ImageConverterTool() {
   // Batch convert all files
   const handleBatchConvert = async () => {
     if (files.length === 0) {
-      setStatusMessage({ type: "error", text: "Please select at least one image to convert." });
+      setStatusMessage({ type: "error", text: "Please select at least one file or PDF document to convert." });
       return;
     }
 
@@ -246,12 +377,14 @@ export default function ImageConverterTool() {
       const totalComp = results.reduce((sum, r) => sum + r.compressedSize, 0);
       const savedPct = totalOrig > 0 ? Math.max(0, Math.round(((totalOrig - totalComp) / totalOrig) * 100)) : 0;
 
+      const formatLabel = outputFormat.toUpperCase();
+
       if (results.length === 1) {
         // Single file: download directly without ZIP
         saveAs(results[0].blob, results[0].targetFilename);
         setStatusMessage({
           type: "success",
-          text: `Success! Converted "${results[0].targetFilename}". Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded directly.`
+          text: `Success! Converted "${results[0].targetFilename}" to ${formatLabel}. Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded directly.`
         });
       } else if (results.length === 2) {
         // 2 files: download both directly without ZIP
@@ -261,14 +394,15 @@ export default function ImageConverterTool() {
         }, 350);
         setStatusMessage({
           type: "success",
-          text: `Success! Converted 2 images ("${results[0].targetFilename}", "${results[1].targetFilename}"). Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Both downloaded directly.`
+          text: `Success! Converted 2 files to ${formatLabel} ("${results[0].targetFilename}", "${results[1].targetFilename}"). Reduced size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Both downloaded directly.`
         });
       } else {
         // More than 2 files: package into ZIP
-        saveAs(zipBlob, "converted_images.zip");
+        const zipFilename = loadedPdfFiles.length > 0 ? "pdf_converted_images.zip" : "converted_images.zip";
+        saveAs(zipBlob, zipFilename);
         setStatusMessage({
           type: "success",
-          text: `Success! Converted ${results.length} images to ${outputFormat.toUpperCase()}. Reduced total size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded as converted_images.zip.`
+          text: `Success! Converted ${results.length} files/pages to ${formatLabel}. Reduced total size by ${savedPct}% (${formatBytes(totalOrig)} → ${formatBytes(totalComp)}). Downloaded as ${zipFilename}.`
         });
       }
     } catch (err: any) {
@@ -283,7 +417,7 @@ export default function ImageConverterTool() {
   };
 
   const getQualityGuidance = (q: number) => {
-    if (q >= 95) return { title: "Maximum Studio Quality", desc: "Virtually indistinguishable from original. Recommended for master product photos & fine textures." };
+    if (q >= 95) return { title: "Maximum Studio Quality", desc: "Virtually indistinguishable from original. Recommended for master product photos & fine text." };
     if (q >= 90) return { title: "Very High (Recommended)", desc: "Optimal balance of rich colour fidelity, fine edge sharpness, and solid file size reduction." };
     if (q >= 80) return { title: "High Quality", desc: "Great visual sharpness with noticeable file size savings. Excellent for web catalogues." };
     if (q >= 70) return { title: "Medium Quality", desc: "Standard web compression. Suitable when smaller download size is a priority." };
@@ -292,16 +426,19 @@ export default function ImageConverterTool() {
 
   const guidance = getQualityGuidance(quality);
 
+  const hasAnyPdfLoaded = files.some((f) => f.isPdfPage) || loadedPdfFiles.length > 0;
+
   return (
     <div className="converter-shell">
       {/* Hero header */}
       <section className="converter-hero">
         <div className="converter-hero-text">
-          <p className="converter-eyebrow">Offline-First Image Optimization Engine</p>
-          <h2>Format-Aware Image Converter & Smart Compression</h2>
+          <p className="converter-eyebrow">Offline-First Document & Image Engine</p>
+          <h2>Format-Aware PDF & Image Converter</h2>
           <p>
-            Preserve authentic sRGB colours, full dynamic range, EXIF orientation, and sharp details while drastically reducing file sizes.
-            Converts 100% locally in your browser or desktop app with zero cloud uploads or third-party servers.
+            Convert PDF documents and images directly to <strong>JPG, PNG, WEBP, BMP, and TIFF</strong> formats.
+            Preserve authentic sRGB colours, crystal-sharp text at high DPI, and fine details while dramatically optimizing file sizes.
+            Runs 100% locally in your browser or desktop app with zero cloud uploads.
           </p>
         </div>
         <div className="converter-hero-badge">
@@ -319,7 +456,7 @@ export default function ImageConverterTool() {
             <div className="converter-card-head">
               <div className="converter-card-title">
                 <span className="converter-step-num">01</span>
-                <h3>Choose Images</h3>
+                <h3>Choose Files</h3>
               </div>
               {files.length > 0 && (
                 <button
@@ -341,41 +478,182 @@ export default function ImageConverterTool() {
               )}
             </div>
 
-            <div
-              className="converter-dropzone"
-              onClick={() => fileInputRef.current?.click()}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                  handleFilesAdded(e.dataTransfer.files);
-                }
-              }}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff,.heic,.heif"
-                onChange={(e) => {
-                  if (e.target.files && e.target.files.length > 0) {
-                    handleFilesAdded(e.target.files);
-                  }
-                }}
-              />
-              <div className="converter-drop-icon">
-                <Upload size={20} />
-              </div>
-              <strong style={{ fontSize: 13, color: "#f1f5f9" }}>Click to select or drag images here</strong>
-              <small style={{ fontSize: 11.5, color: "#64748b" }}>
-                Supports JPG, PNG, WEBP, BMP, TIFF, HEIC · Multi-file batch selection
-              </small>
+            {/* Mode selection tabs */}
+            <div className="converter-tab-bar">
+              <button
+                type="button"
+                className={`converter-tab-btn ${activeTab === "all" ? "active" : ""}`}
+                onClick={() => setActiveTab("all")}
+              >
+                <ImageIcon size={14} />
+                <span>All Images & PDF</span>
+              </button>
+              <button
+                type="button"
+                className={`converter-tab-btn ${activeTab === "pdf" ? "active" : ""}`}
+                onClick={() => setActiveTab("pdf")}
+              >
+                <FileText size={14} />
+                <span>PDF to Image Mode</span>
+              </button>
             </div>
 
+            {/* Dropzone */}
+            {isExtractingPdf ? (
+              <div className="converter-extracting-overlay">
+                <RefreshCw size={26} color="#38bdf8" className="spin" />
+                <div>
+                  <strong style={{ fontSize: 13, color: "#f1f5f9" }}>
+                    {pdfExtractionProgress ? pdfExtractionProgress.message : "Rendering PDF pages..."}
+                  </strong>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                    Rendering crisp vector pages into high-resolution images locally
+                  </div>
+                </div>
+                {pdfExtractionProgress && (
+                  <div style={{ width: "80%", maxWidth: 280, height: 6, background: "#1e293b", borderRadius: 3, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${pdfExtractionProgress.percent}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg, #38bdf8, #818cf8)",
+                        transition: "width 0.2s ease"
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                className="converter-dropzone"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleFilesAdded(e.dataTransfer.files);
+                  }
+                }}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={
+                    activeTab === "pdf"
+                      ? "application/pdf,.pdf"
+                      : "image/jpeg,image/png,image/webp,image/bmp,image/tiff,.heic,.heif,application/pdf,.pdf"
+                  }
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      handleFilesAdded(e.target.files);
+                      e.target.value = "";
+                    }
+                  }}
+                />
+                <div className="converter-drop-icon">
+                  {activeTab === "pdf" ? <FileText size={20} color="#f43f5e" /> : <Upload size={20} />}
+                </div>
+                <strong style={{ fontSize: 13, color: "#f1f5f9" }}>
+                  {activeTab === "pdf"
+                    ? "Click to select or drag PDF documents here"
+                    : "Click to select or drag PDF documents or images here"}
+                </strong>
+                <small style={{ fontSize: 11.5, color: "#64748b" }}>
+                  {activeTab === "pdf"
+                    ? "Multi-page PDF auto-splitting · Converts to JPG, PNG, WEBP, BMP, TIFF"
+                    : "Supports PDF, JPG, PNG, WEBP, BMP, TIFF, HEIC · Multi-file batch selection"}
+                </small>
+              </div>
+            )}
+
+            {/* PDF rendering resolution & options (active when PDF tab is open or PDF is loaded) */}
+            {(activeTab === "pdf" || hasAnyPdfLoaded) && (
+              <div className="converter-pdf-config-box">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <FileText size={15} color="#f43f5e" />
+                    <strong style={{ fontSize: 12, color: "#f1f5f9" }}>PDF Page Render Resolution (DPI)</strong>
+                  </div>
+                  <span style={{ fontSize: 11, color: "#38bdf8" }}>{pdfDpi} DPI</span>
+                </div>
+
+                <div className="converter-dpi-options">
+                  <button
+                    type="button"
+                    className={`converter-dpi-btn ${pdfDpi === 72 ? "active" : ""}`}
+                    onClick={() => {
+                      setPdfDpi(72);
+                      if (loadedPdfFiles.length > 0) handleRerenderPdfs(72);
+                    }}
+                  >
+                    <strong>72 DPI</strong>
+                    <small>Draft / Compact</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`converter-dpi-btn ${pdfDpi === 150 ? "active" : ""}`}
+                    onClick={() => {
+                      setPdfDpi(150);
+                      if (loadedPdfFiles.length > 0) handleRerenderPdfs(150);
+                    }}
+                  >
+                    <strong>150 DPI</strong>
+                    <small>Web & Screen</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`converter-dpi-btn ${pdfDpi === 200 ? "active" : ""}`}
+                    onClick={() => {
+                      setPdfDpi(200);
+                      if (loadedPdfFiles.length > 0) handleRerenderPdfs(200);
+                    }}
+                  >
+                    <strong>200 DPI ★</strong>
+                    <small>Sharp Text</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`converter-dpi-btn ${pdfDpi === 300 ? "active" : ""}`}
+                    onClick={() => {
+                      setPdfDpi(300);
+                      if (loadedPdfFiles.length > 0) handleRerenderPdfs(300);
+                    }}
+                  >
+                    <strong>300 DPI</strong>
+                    <small>Ultra Print</small>
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#94a3b8" }}>
+                  <span>DPI controls output sharpness for vector text & illustrations.</span>
+                  {loadedPdfFiles.length > 0 && !isExtractingPdf && (
+                    <button
+                      type="button"
+                      onClick={() => handleRerenderPdfs(pdfDpi)}
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        color: "#38bdf8",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        fontSize: 11
+                      }}
+                    >
+                      <RefreshCw size={11} /> Re-render pages
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* File List */}
             {files.length > 0 && (
               <div className="converter-file-list">
                 {files.map((item, idx) => (
@@ -385,8 +663,17 @@ export default function ImageConverterTool() {
                     onClick={() => setSelectedIndex(idx)}
                   >
                     <div className="converter-file-name">
-                      <ImageIcon size={14} color={idx === selectedIndex ? "#38bdf8" : "#64748b"} />
-                      <span>{item.file.name}</span>
+                      {item.isPdfPage ? (
+                        <FileText size={14} color="#f43f5e" />
+                      ) : (
+                        <ImageIcon size={14} color={idx === selectedIndex ? "#38bdf8" : "#64748b"} />
+                      )}
+                      <span title={item.file.name}>{item.file.name}</span>
+                      {item.isPdfPage && (
+                        <span className="converter-pdf-badge">
+                          PDF p.{item.pageNumber}/{item.totalPages}
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span style={{ fontSize: 11, color: "#94a3b8" }}>
@@ -426,7 +713,7 @@ export default function ImageConverterTool() {
                 <span>Output Format</span>
                 <span style={{ fontSize: 11, color: "#64748b" }}>
                   {outputFormat === "jpg"
-                    ? "Best for photographs & product shots"
+                    ? "Standard photo & document format (with sRGB & EXIF)"
                     : outputFormat === "webp"
                     ? "Modern web standard (compact + alpha)"
                     : outputFormat === "png"
@@ -449,9 +736,9 @@ export default function ImageConverterTool() {
                   }
                 }}
               >
-                <option value="jpg">JPG / JPEG (Standard photo format with sRGB & EXIF)</option>
-                <option value="webp">WEBP (Modern high-efficiency format with transparency)</option>
+                <option value="jpg">JPG / JPEG (Standard photo & document format with sRGB)</option>
                 <option value="png">PNG (Lossless 32-bit transparent format)</option>
+                <option value="webp">WEBP (Modern high-efficiency format with transparency)</option>
                 <option value="bmp">BMP (Windows Bitmap format)</option>
                 <option value="tiff">TIFF (Archival TIFF format)</option>
               </select>
@@ -561,7 +848,7 @@ export default function ImageConverterTool() {
                   />
                 </div>
                 <small style={{ fontSize: 11, color: "#94a3b8" }}>
-                  Reduces the file size while maintaining pixel dimensions and colour accuracy.
+                  Reduces file size while preserving pixel dimensions and colour accuracy.
                 </small>
               </div>
             )}
@@ -705,7 +992,7 @@ export default function ImageConverterTool() {
               <div style={{ minHeight: 280, display: "grid", placeItems: "center", color: "#64748b", textAlign: "center", padding: 30 }}>
                 <div>
                   <ImageIcon size={38} color="#1e293b" style={{ margin: "0 auto 12px" }} />
-                  <p style={{ margin: 0, fontSize: 13 }}>Select an image from Step 1 to inspect live before-and-after results.</p>
+                  <p style={{ margin: 0, fontSize: 13 }}>Select an image or PDF page from Step 1 to inspect live before-and-after results.</p>
                 </div>
               </div>
             ) : (
@@ -714,8 +1001,10 @@ export default function ImageConverterTool() {
                   {/* Original Card */}
                   <div className="converter-preview-box">
                     <h4>
-                      <span>Original</span>
-                      <span style={{ color: "#64748b" }}>{activeImage.file.name.split(".").pop()?.toUpperCase()}</span>
+                      <span>{activeImage.isPdfPage ? `PDF Page ${activeImage.pageNumber}/${activeImage.totalPages}` : "Original"}</span>
+                      <span style={{ color: activeImage.isPdfPage ? "#f43f5e" : "#64748b" }}>
+                        {activeImage.isPdfPage ? "PDF" : activeImage.file.name.split(".").pop()?.toUpperCase()}
+                      </span>
                     </h4>
                     <div className={`converter-img-container ${isZoomed ? "zoom" : ""}`}>
                       <img src={activeImage.previewUrl} alt="Original Preview" />
@@ -733,7 +1022,7 @@ export default function ImageConverterTool() {
                   {/* Compressed Card */}
                   <div className="converter-preview-box">
                     <h4>
-                      <span>Compressed Result</span>
+                      <span>Converted Result</span>
                       <span style={{ color: "#38bdf8" }}>{outputFormat.toUpperCase()}</span>
                     </h4>
                     <div className={`converter-img-container ${isZoomed ? "zoom" : ""}`}>
@@ -743,7 +1032,7 @@ export default function ImageConverterTool() {
                           <span>Generating preview...</span>
                         </div>
                       ) : previewResult ? (
-                        <img src={previewResult.previewUrl} alt="Compressed Preview" />
+                        <img src={previewResult.previewUrl} alt="Converted Preview" />
                       ) : (
                         <span style={{ color: "#64748b", fontSize: 12 }}>Preview pending</span>
                       )}
@@ -789,7 +1078,7 @@ export default function ImageConverterTool() {
                         gap: 5
                       }}
                     >
-                      <Download size={13} /> Save this image
+                      <Download size={13} /> Save this image ({outputFormat.toUpperCase()})
                     </button>
                   </div>
                 )}
@@ -799,7 +1088,7 @@ export default function ImageConverterTool() {
                   <div className="converter-warning-note">
                     <Info size={16} style={{ flexShrink: 0 }} />
                     <span>
-                      <strong>Notice:</strong> JPEG does not support transparency. Transparent areas in this PNG will be cleanly filled with pure white.
+                      <strong>Notice:</strong> JPEG does not support transparency. Transparent areas in this image will be cleanly rendered on pure white.
                     </span>
                   </div>
                 )}
@@ -833,7 +1122,7 @@ export default function ImageConverterTool() {
       <div className="converter-action-bar">
         <div>
           <strong style={{ fontSize: 13, color: "#f1f5f9" }}>
-            {files.length} {files.length === 1 ? "image" : "images"} selected
+            {files.length} {files.length === 1 ? "page/image" : "pages/images"} ready
           </strong>
           <span style={{ fontSize: 12, color: "#64748b", marginLeft: 8 }}>
             Total original size: {formatBytes(files.reduce((sum, f) => sum + f.file.size, 0))}
@@ -860,10 +1149,10 @@ export default function ImageConverterTool() {
             <Download size={16} />
             <span>
               {files.length <= 1
-                ? "Convert & Download Image"
+                ? `Convert & Download Image (${outputFormat.toUpperCase()})`
                 : files.length === 2
-                ? "Convert & Download Images (2 files)"
-                : "Convert & Download ZIP"}
+                ? `Convert & Download 2 Images (${outputFormat.toUpperCase()})`
+                : `Convert & Download ZIP (${outputFormat.toUpperCase()})`}
             </span>
           </button>
         )}
