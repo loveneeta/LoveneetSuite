@@ -6,7 +6,7 @@
 - Company/team accounts, with a configurable total account cap. A plan with 6 accounts means one company admin plus five additional team members.
 - Role-based access: Super Admin, Company Admin and Member.
 - Company tool entitlements and individual PDF tool entitlements.
-- Subscription plans with price/currency, validity days, user limits and included tools. Expiry is enforced at login and API authorization.
+- Subscription plans with price/currency, validity days, user limits and included tools. Companies can request a plan change; Super Admin approves or rejects it. Expiry is enforced at login and API authorization.
 - Tool display-name management.
 - Server-side watermark policy for PDF, image, text, DOCX, PPTX and XLSX outputs, including files inside generated ZIPs. Browser-generated downloads must pass through `/api/output/watermark`; the supplied UI download helpers do this.
 - Audit events, password change, administrator-issued temporary password resets, and optional SMTP password-reset email.
