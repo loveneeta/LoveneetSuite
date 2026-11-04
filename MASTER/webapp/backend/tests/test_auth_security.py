@@ -53,7 +53,7 @@ class AuthSecurityTests(unittest.TestCase):
             conn.execute("INSERT INTO companies(id,name,slug,tool_access,created_at) VALUES(?,?,?,?,?)",
                          ("company-b", "Company B", "company-b", '["convert"]', auth.now()))
         self.assertEqual(auth.access("company-a"), ["pdf:merge"])
-        self.assertEqual(auth.company_tool_access("company-b"), ["convert"])
+        self.assertEqual(auth.access("company-b"), ["convert"])
 
 
 if __name__ == "__main__":
