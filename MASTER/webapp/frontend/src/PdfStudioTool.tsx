@@ -25,7 +25,7 @@ const tools:Tool[]=[
 {id:"pdf-to-pdfa",name:"PDF to PDF/A",description:"Archival conversion; requires Ghostscript validation.",category:"Convert from PDF",disabled:true},
 {id:"rotate",name:"Rotate PDF",description:"Rotate selected pages by 90, 180 or 270 degrees.",category:"Edit PDF",fields:["angle","pages"]},
 {id:"watermark",name:"Add watermark",description:"Stamp text across selected PDF pages.",category:"Edit PDF",fields:["text","pages"]},
-{id:"crop",name:"Crop PDF",description:"Crop page margins consistently.",category:"Edit PDF",fields:["margin","pages"]},
+{id:"page-numbers",name:"Add page numbers",description:"Stamp page numbers at the bottom of each page.",category:"Edit PDF",fields:["pages"]},\n{id:"crop",name:"Crop PDF",description:"Crop page margins consistently.",category:"Edit PDF",fields:["margin","pages"]},
 {id:"redact",name:"Redact PDF",description:"Permanently redact matching selectable text.",category:"Edit PDF",fields:["text"]},
 {id:"forms",name:"PDF Forms",description:"Inspect interactive form fields and their current values.",category:"Edit PDF"},
 {id:"sign",name:"Sign PDF",description:"Digital and drawn signing workflow is planned; not simulated.",category:"Edit PDF",disabled:true},
