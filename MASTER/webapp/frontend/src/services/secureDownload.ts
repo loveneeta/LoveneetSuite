@@ -3,7 +3,8 @@ import { isDesktop } from "./platform";
 export async function secureDownload(blob: Blob, filename: string): Promise<void> {
   const form = new FormData();
   form.append("file", blob, filename);
-  const backendBaseUrl = import.meta.env.VITE_API_BASE_URL ||
+  const configuredBackendUrl = (import.meta as ImportMeta & { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL;
+  const backendBaseUrl = configuredBackendUrl ||
     (isDesktop() ? "http://127.0.0.1:8000" : window.location.origin);
   const watermarkUrl = new URL("/api/output/watermark", backendBaseUrl);
   const response = await fetch(watermarkUrl.toString(), {
