@@ -23,12 +23,14 @@ def init_db():
   c.executescript("""
   CREATE TABLE IF NOT EXISTS companies(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,status TEXT NOT NULL DEFAULT 'active',plan_id TEXT,max_users INTEGER NOT NULL DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',plan_started_at TEXT,plan_expires_at TEXT,watermark_enabled INTEGER NOT NULL DEFAULT 1,watermark_text TEXT NOT NULL DEFAULT '{company} · Loveneet Suite',watermark_position TEXT NOT NULL DEFAULT 'bottom-right',watermark_opacity REAL NOT NULL DEFAULT .35,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,description TEXT DEFAULT '',price REAL DEFAULT 0,currency TEXT DEFAULT 'INR',duration_days INTEGER DEFAULT 30,max_users INTEGER DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',active INTEGER DEFAULT 1,created_at TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,company_id TEXT REFERENCES companies(id) ON DELETE CASCADE,email TEXT UNIQUE COLLATE NOCASE NOT NULL,full_name TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL,status TEXT DEFAULT 'active',must_change_password INTEGER DEFAULT 0,last_login TEXT,created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,company_id TEXT REFERENCES companies(id) ON DELETE CASCADE,email TEXT UNIQUE COLLATE NOCASE NOT NULL,full_name TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL,session_version INTEGER NOT NULL DEFAULT 0,status TEXT DEFAULT 'active',must_change_password INTEGER DEFAULT 0,last_login TEXT,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_user_id TEXT,company_id TEXT,action TEXT NOT NULL,detail TEXT DEFAULT '{}',created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,token_hash TEXT NOT NULL,expires_at REAL NOT NULL,used INTEGER DEFAULT 0);
   CREATE INDEX IF NOT EXISTS users_company_idx ON users(company_id);
   """)
+  ucols={row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+  if "session_version" not in ucols:c.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
   cols={row[1] for row in c.execute("PRAGMA table_info(companies)").fetchall()}
   if "plan_started_at" not in cols:c.execute("ALTER TABLE companies ADD COLUMN plan_started_at TEXT")
   if "plan_expires_at" not in cols:c.execute("ALTER TABLE companies ADD COLUMN plan_expires_at TEXT")
@@ -56,7 +58,7 @@ def checkpw(p,s):
   a,n,salt,w=s.split("$",3); d=hashlib.pbkdf2_hmac("sha256",p.encode(),base64.urlsafe_b64decode(salt+"==="),int(n)); return a=="pbkdf2_sha256" and hmac.compare_digest(b64(d),w)
  except Exception:return False
 def token(u):
- body=b64(json.dumps({"sub":u["id"],"exp":int(time.time())+SESSION_SECONDS},separators=(",",":")).encode())
+ body=b64(json.dumps({"sub":u["id"],"ver":int(u["session_version"]),"exp":int(time.time())+SESSION_SECONDS},separators=(",",":")).encode())
  return body+"."+b64(hmac.new(secret(),body.encode(),hashlib.sha256).digest())
 def decode(t):
  try:
@@ -69,6 +71,7 @@ def user_token(t):
  if not p:return None
  with db() as c:
   u=c.execute("SELECT * FROM users WHERE id=? AND status='active'",(p["sub"],)).fetchone()
+  if u and int(p.get("ver",0))!=int(u["session_version"]):return None
   if u and u["company_id"]:
    co=c.execute("SELECT status,plan_expires_at FROM companies WHERE id=?",(u["company_id"],)).fetchone()
    if not co or co["status"]!="active" or (co["plan_expires_at"] and datetime.fromisoformat(co["plan_expires_at"]) < datetime.now(timezone.utc)):return None
@@ -96,7 +99,7 @@ def public(u):
    co=dict(x);co["tool_access"]=json.loads(co["tool_access"]);co["watermark_enabled"]=bool(co["watermark_enabled"])
  return {"id":u["id"],"email":u["email"],"full_name":u["full_name"],"role":u["role"],"company_id":u["company_id"],"company":co,"must_change_password":bool(u["must_change_password"])}
 def temp_password():return secrets.token_urlsafe(16)+"aA1!"
-def setpw(c,uid,p,must=True):c.execute("UPDATE users SET password_hash=?,must_change_password=? WHERE id=?",(hashpw(p),int(must),uid))
+def setpw(c,uid,p,must=True):c.execute("UPDATE users SET password_hash=?,must_change_password=?,session_version=session_version+1 WHERE id=?",(hashpw(p),int(must),uid))
 class Setup(BaseModel):
  setup_key:str;email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$");full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
 class Login(BaseModel):
@@ -149,12 +152,14 @@ def logout(res:Response):
 @router.get("/me")
 def me(r:Request):return {"user":public(current(r))}
 @router.post("/change-password")
-def change(x:Password,r:Request):
+def change(x:Password,r:Request,res:Response):
  u=current(r)
  with db() as c:
   row=c.execute("SELECT password_hash FROM users WHERE id=?",(u["id"],)).fetchone()
   if not row or not checkpw(x.current_password,row["password_hash"]):raise HTTPException(400,"Current password is incorrect.")
   setpw(c,u["id"],x.new_password,False)
+  updated=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
+ res.set_cookie(COOKIE,token(updated),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
  audit(u,"password_changed",u["company_id"]);return {"ok":True}
 @router.post("/forgot-password")
 def forgot(x:dict):
