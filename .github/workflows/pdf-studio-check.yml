@@ -1,0 +1,42 @@
+name: PDF Studio Integration Check
+
+on:
+  pull_request:
+    paths:
+      - "MASTER/webapp/frontend/**"
+      - "MASTER/webapp/backend/**"
+      - ".github/workflows/pdf-studio-check.yml"
+  push:
+    branches:
+      - "feature/pdf-studio-local"
+    paths:
+      - "MASTER/webapp/frontend/**"
+      - "MASTER/webapp/backend/**"
+      - ".github/workflows/pdf-studio-check.yml"
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: MASTER/webapp/frontend/package-lock.json
+      - run: npm ci
+        working-directory: MASTER/webapp/frontend
+      - run: npm run build
+        working-directory: MASTER/webapp/frontend
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: MASTER/webapp/backend
+      - run: python -m py_compile main.py pdf_tools.py
+        working-directory: MASTER/webapp/backend
