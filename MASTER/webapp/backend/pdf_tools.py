@@ -127,7 +127,6 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
         if doc.needs_pass:
             if not password or not doc.authenticate(password): raise HTTPException(400,"The PDF password is missing or incorrect.")
         if tool=="unlock":
-            doc.save_clean = False
             out=doc.tobytes(encryption=fitz.PDF_ENCRYPT_NONE,garbage=4,deflate=True)
             return response(out,"unlocked.pdf")
         if tool=="protect":
@@ -135,17 +134,7 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
             if len(newpass)<4: raise HTTPException(400,"Set a new password with at least 4 characters.")
             return response(doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,owner_pw=newpass,user_pw=newpass,permissions=fitz.PDF_PERM_ACCESSIBILITY|fitz.PDF_PERM_PRINT,garbage=4,deflate=True),"protected.pdf")
         if tool in {"repair","compress"}:
-            if tool=="compress":
-                for p in doc:
-                    for img in p.get_images(full=True):
-                        xref=img[0]
-                        try:
-                            pix=fitz.Pixmap(doc,xref)
-                            if pix.width>1800 or pix.height>1800:
-                                scaled=fitz.Pixmap(pix,0.7)
-                                doc.update_stream(xref,scaled.tobytes("jpeg"))
-                        except Exception: pass
-            return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
+                        return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
         if tool=="page-numbers":
             for i in parse_pages(str(opt.get("pages","")),doc.page_count):
                 p=doc[i]; p.insert_text((p.rect.width/2-12,p.rect.height-24),str(i+1),fontsize=10,fontname="helv",color=(0.25,0.3,0.4),overlay=True)
@@ -164,7 +153,7 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
         if tool=="watermark":
             label=str(opt.get("text","CONFIDENTIAL"))[:120]
             for i in parse_pages(str(opt.get("pages","")),doc.page_count):
-                p=doc[i]; p.insert_textbox(p.rect, label, fontsize=36, fontname="helv", color=(0.65,0.65,0.65), align=1, overlay=True, rotate=45)
+                p=doc[i]; p.insert_textbox(p.rect, label, fontsize=36, fontname="helv", color=(0.65,0.65,0.65), align=1, overlay=True)
             return response(doc.tobytes(garbage=4,deflate=True),"watermarked.pdf")
         if tool=="crop":
             margin=max(0,min(200,float(opt.get("margin",24))))
