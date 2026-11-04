@@ -362,6 +362,11 @@ def wm_bytes(data,filename,cfg,company,user):
    from openpyxl.styles import Font
    sheet["A1"].font=Font(size=18,bold=True,color="777777")
    out=io.BytesIO();book.save(out);return out.getvalue()
+  if ext==".json":
+   value=json.loads(data.decode("utf-8"))
+   if isinstance(value,dict):value["_watermark"]=label
+   else:value={"_watermark":label,"data":value}
+   return json.dumps(value,ensure_ascii=False,indent=2).encode("utf-8")
   if ext in {".txt",".md",".csv"}:return (label+"\n"+data.decode("utf-8",errors="replace")).encode()
   return data
  except Exception:raise
@@ -408,13 +413,15 @@ class WatermarkMiddleware:
   if scope["type"]!="http" or not scope.get("path","").startswith("/api/") or scope["path"].startswith("/api/auth/") or scope["path"]=="/api/output/watermark":return await self.app(scope,receive,send)
   u=scope.get("state",{}).get("auth_user")
   if not u:return await self.app(scope,receive,send)
-  start=None;parts=[];total=0
+  start=None;parts=[];total=0;overflow=False
   async def capture(msg):
-   nonlocal start,total
+   nonlocal start,total,overflow
    if msg["type"]=="http.response.start":start=msg;return
    if msg["type"]!="http.response.body":return await send(msg)
+   if overflow:return
    chunk=msg.get("body",b"");total+=len(chunk)
    if total>400*1024*1024:
+    overflow=True
     err=b'{"detail":"Output exceeds watermark processing size. Reduce batch size."}'
     await send({"type":"http.response.start","status":413,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(err)).encode())]});await send({"type":"http.response.body","body":err});return
    parts.append(chunk)
