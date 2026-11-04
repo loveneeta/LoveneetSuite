@@ -435,7 +435,7 @@ class WatermarkMiddleware:
 
 
 @output_router.post("/api/output/watermark")
-async def watermark_client_output(file: UploadFile = File(...), request: Request = None):
+async def watermark_client_output(request: Request, file: UploadFile = File(...)):
     u=current(request)
     filename=Path(file.filename or "output.bin").name
     data=await file.read(400*1024*1024+1)
