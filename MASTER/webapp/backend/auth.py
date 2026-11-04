@@ -396,6 +396,11 @@ class AuthMiddleware:
    body=b'{"detail":"Authentication required. Please sign in."}'
    await send({"type":"http.response.start","status":401,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]});await send({"type":"http.response.body","body":body});return
   scope.setdefault("state",{})["auth_user"]=u
+  if u["must_change_password"] and path not in {"/api/auth/me","/api/auth/change-password","/api/auth/logout"}:
+   body=b'{"detail":"A password change is required before accessing the workspace."}'
+   await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
+   await send({"type":"http.response.body","body":body})
+   return
   if u["role"]!="super_admin":
    tool=None
    if path.startswith("/api/pdf-tools/"):tool="pdf:"+path.rsplit("/",1)[-1]
