@@ -1493,3 +1493,14 @@ async def collector_open_folder(payload: dict):
 # PDF Studio local processing router
 from pdf_tools import router as pdf_tools_router
 app.include_router(pdf_tools_router)
+
+
+# Multi-tenant authentication, authorization and compulsory output watermarking
+from auth import router as auth_router, init_db as init_auth_db, AuthMiddleware, WatermarkMiddleware
+app.include_router(auth_router)
+app.add_middleware(WatermarkMiddleware)
+app.add_middleware(AuthMiddleware)
+
+@app.on_event("startup")
+def initialize_auth_database():
+    init_auth_db()
