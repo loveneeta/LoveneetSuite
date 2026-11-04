@@ -19,6 +19,7 @@ def path():
 def db():
  c=sqlite3.connect(path(),timeout=20); c.row_factory=sqlite3.Row; c.execute("PRAGMA foreign_keys=ON"); c.execute("PRAGMA journal_mode=WAL"); return c
 def init_db():
+ if os.getenv("AUTH_COOKIE_SAMESITE","lax").lower()=="none" and os.getenv("AUTH_COOKIE_SECURE","false").lower()!="true":raise RuntimeError("AUTH_COOKIE_SAMESITE=None requires AUTH_COOKIE_SECURE=true.")
  with db() as c:
   c.executescript("""
   CREATE TABLE IF NOT EXISTS companies(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,status TEXT NOT NULL DEFAULT 'active',plan_id TEXT,max_users INTEGER NOT NULL DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',plan_started_at TEXT,plan_expires_at TEXT,watermark_enabled INTEGER NOT NULL DEFAULT 1,watermark_text TEXT NOT NULL DEFAULT '{company} · Loveneet Suite',watermark_position TEXT NOT NULL DEFAULT 'bottom-right',watermark_opacity REAL NOT NULL DEFAULT .35,created_at TEXT NOT NULL);
@@ -399,6 +400,24 @@ class AuthMiddleware:
   public=path in {"/api/health","/api/auth/status","/api/auth/setup","/api/auth/login","/api/auth/forgot-password","/api/auth/reset-password"}
   if scope["type"]!="http" or not path.startswith("/api/") or public:return await self.app(scope,receive,send)
   headers={k.decode().lower():v.decode() for k,v in scope.get("headers",[])};t=None
+  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","true").lower()!="true":
+   origin=headers.get("origin")
+   if origin:
+    proto=headers.get("x-forwarded-proto",scope.get("scheme","http")).split(",")[0].strip()
+    host=headers.get("host","")
+    trusted={x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
+    trusted.update({"http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174","http://localhost:3000","http://127.0.0.1:3000"})
+    if host:trusted.add(proto+"://"+host)
+    if origin.rstrip("/") not in trusted:
+     body=b'{"detail":"Request origin is not trusted."}'
+     await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
+     await send({"type":"http.response.body","body":body})
+     return
+   elif headers.get("sec-fetch-site")=="cross-site":
+    body=b'{"detail":"Cross-site request rejected."}'
+    await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
+    await send({"type":"http.response.body","body":body})
+    return
   for p in headers.get("cookie","").split(";"):
    k,sep,v=p.strip().partition("=")
    if sep and k==COOKIE:t=v
