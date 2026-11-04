@@ -405,6 +405,8 @@ class AuthMiddleware:
    tool=None
    if path.startswith("/api/pdf-tools/"):tool="pdf:"+path.rsplit("/",1)[-1]
    elif path.startswith("/api/collector/"):tool="collector"
+   elif path.startswith("/api/ppt-template/") or path=="/api/excel-to-ppt":tool="excel-ppt"
+   elif path.startswith("/api/ppt-excel/"):tool="ppt-excel"
    else:tool={"/api/convert":"convert","/api/organize":"organize","/api/ppt-export":"ppt"}.get(path)
    if tool:
     allowed=access(u["company_id"])
