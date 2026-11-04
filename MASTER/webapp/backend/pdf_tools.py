@@ -146,6 +146,16 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
                                 doc.update_stream(xref,scaled.tobytes("jpeg"))
                         except Exception: pass
             return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
+        if tool=="page-numbers":
+            for i in parse_pages(str(opt.get("pages","")),doc.page_count):
+                p=doc[i]; p.insert_text((p.rect.width/2-12,p.rect.height-24),str(i+1),fontsize=10,fontname="helv",color=(0.25,0.3,0.4),overlay=True)
+            return response(doc.tobytes(garbage=4,deflate=True),"numbered.pdf")
+        if tool=="edit-pdf":
+            label=str(opt.get("text","")).strip()
+            if not label: raise HTTPException(400,"Enter text to add.")
+            for i in parse_pages(str(opt.get("pages","")),doc.page_count):
+                doc[i].insert_text((72,72),label[:300],fontsize=11,fontname="helv",color=(0.1,0.1,0.1),overlay=True)
+            return response(doc.tobytes(garbage=4,deflate=True),"edited.pdf")
         if tool=="rotate":
             angle=int(opt.get("angle",90))
             if angle not in {90,180,270,-90,-180,-270}: raise HTTPException(400,"Rotation must be 90, 180 or 270 degrees.")
