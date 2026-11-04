@@ -1,6 +1,6 @@
 # PDF Studio — Local Processing
 
-PDF Studio is integrated into the existing Loveneet Suite React/FastAPI application. It does not call iLovePDF or any third-party PDF API. Files are posted only to the configured Loveneet Suite API server for processing.
+PDF Studio provides 33 listed tools across the seven requested groups and is integrated into the existing Loveneet Suite React/FastAPI application. It does not call iLovePDF or any third-party PDF API. Files are posted only to the configured Loveneet Suite API server for processing.
 
 ## Local features
 - Merge, split, remove, extract and reorder PDF pages
