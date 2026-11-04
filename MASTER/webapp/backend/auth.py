@@ -126,7 +126,7 @@ def setup(x:Setup,r:Request,res:Response):
  with db() as c:
   if c.execute("SELECT 1 FROM users WHERE role='super_admin'").fetchone():raise HTTPException(409,"Super Admin already exists.")
   uid=uuid.uuid4().hex;c.execute("INSERT INTO users(id,email,full_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",(uid,x.email.lower(),x.full_name,hashpw(x.password),"super_admin",now()));u=c.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
- res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite="lax",max_age=SESSION_SECONDS,path="/")
+ res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
  audit(u,"super_admin_created");return {"user":public(u)}
 @router.post("/login")
 def login(x:Login,r:Request,res:Response):
@@ -145,7 +145,7 @@ def login(x:Login,r:Request,res:Response):
  return {"user":public(u)}
 @router.post("/logout")
 def logout(res:Response):
- res.delete_cookie(COOKIE,path="/",httponly=True,samesite="lax");return {"ok":True}
+ res.delete_cookie(COOKIE,path="/",httponly=True,samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());return {"ok":True}
 @router.get("/me")
 def me(r:Request):return {"user":public(current(r))}
 @router.post("/change-password")
