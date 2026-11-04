@@ -28,6 +28,7 @@ const tools:Tool[]=[
 {id:"page-numbers",name:"Add page numbers",description:"Stamp page numbers at the bottom of each page.",category:"Edit PDF",fields:["pages"]},
 {id:"crop",name:"Crop PDF",description:"Crop page margins consistently.",category:"Edit PDF",fields:["margin","pages"]},
 {id:"redact",name:"Redact PDF",description:"Permanently redact matching selectable text.",category:"PDF Security",fields:["text"]},
+{id:"edit-pdf",name:"Edit PDF",description:"Add a text note to selected pages.",category:"Edit PDF",fields:["text","pages"]},
 {id:"forms",name:"PDF Forms",description:"Inspect interactive form fields and their current values.",category:"Edit PDF"},
 {id:"sign",name:"Sign PDF",description:"Digital and drawn signing workflow is planned; not simulated.",category:"PDF Security",disabled:true},
 {id:"unlock",name:"Unlock PDF",description:"Remove password protection when you know the password.",category:"PDF Security",fields:["password"]},
