@@ -134,7 +134,7 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
             if len(newpass)<4: raise HTTPException(400,"Set a new password with at least 4 characters.")
             return response(doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,owner_pw=newpass,user_pw=newpass,permissions=fitz.PDF_PERM_ACCESSIBILITY|fitz.PDF_PERM_PRINT,garbage=4,deflate=True),"protected.pdf")
         if tool in {"repair","compress"}:
-                        return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
+            return response(doc.tobytes(garbage=4,deflate=True,clean=True),"optimized.pdf")
         if tool=="page-numbers":
             for i in parse_pages(str(opt.get("pages","")),doc.page_count):
                 p=doc[i]; p.insert_text((p.rect.width/2-12,p.rect.height-24),str(i+1),fontsize=10,fontname="helv",color=(0.25,0.3,0.4),overlay=True)
