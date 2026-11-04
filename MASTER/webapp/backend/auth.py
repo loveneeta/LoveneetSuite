@@ -1,6 +1,6 @@
 from __future__ import annotations
 import base64, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, io, re, zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -19,7 +19,7 @@ def db():
 def init_db():
  with db() as c:
   c.executescript("""
-  CREATE TABLE IF NOT EXISTS companies(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,status TEXT NOT NULL DEFAULT 'active',plan_id TEXT,max_users INTEGER NOT NULL DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',watermark_enabled INTEGER NOT NULL DEFAULT 1,watermark_text TEXT NOT NULL DEFAULT '{company} · Loveneet Suite',watermark_position TEXT NOT NULL DEFAULT 'bottom-right',watermark_opacity REAL NOT NULL DEFAULT .35,created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS companies(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,status TEXT NOT NULL DEFAULT 'active',plan_id TEXT,max_users INTEGER NOT NULL DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',plan_started_at TEXT,plan_expires_at TEXT,watermark_enabled INTEGER NOT NULL DEFAULT 1,watermark_text TEXT NOT NULL DEFAULT '{company} · Loveneet Suite',watermark_position TEXT NOT NULL DEFAULT 'bottom-right',watermark_opacity REAL NOT NULL DEFAULT .35,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,description TEXT DEFAULT '',price REAL DEFAULT 0,currency TEXT DEFAULT 'INR',duration_days INTEGER DEFAULT 30,max_users INTEGER DEFAULT 6,tool_access TEXT NOT NULL DEFAULT '[]',active INTEGER DEFAULT 1,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,company_id TEXT REFERENCES companies(id) ON DELETE CASCADE,email TEXT UNIQUE COLLATE NOCASE NOT NULL,full_name TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL,status TEXT DEFAULT 'active',must_change_password INTEGER DEFAULT 0,last_login TEXT,created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -27,6 +27,9 @@ def init_db():
   CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,token_hash TEXT NOT NULL,expires_at REAL NOT NULL,used INTEGER DEFAULT 0);
   CREATE INDEX IF NOT EXISTS users_company_idx ON users(company_id);
   """)
+  cols={row[1] for row in c.execute("PRAGMA table_info(companies)").fetchall()}
+  if "plan_started_at" not in cols:c.execute("ALTER TABLE companies ADD COLUMN plan_started_at TEXT")
+  if "plan_expires_at" not in cols:c.execute("ALTER TABLE companies ADD COLUMN plan_expires_at TEXT")
   defaults={"tool_labels":json.dumps(LABELS),"watermark_enabled":"true","watermark_text":"{company} · Loveneet Suite","watermark_position":"bottom-right","watermark_opacity":"0.35"}
   for k,v in defaults.items(): c.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",(k,v))
 def secret():
@@ -93,11 +96,11 @@ def public(u):
 def temp_password():return secrets.token_urlsafe(16)+"aA1!"
 def setpw(c,uid,p,must=True):c.execute("UPDATE users SET password_hash=?,must_change_password=? WHERE id=?",(hashpw(p),int(must),uid))
 class Setup(BaseModel):
- setup_key:str;email:str=Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
+ setup_key:str;email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$");full_name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=12,max_length=200)
 class Login(BaseModel):
  email:EmailStr;password:str=Field(min_length=1,max_length=200)
 class Company(BaseModel):
- name:str=Field(min_length=2,max_length=120);admin_name:str=Field(min_length=2,max_length=100);admin_email:str=Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+ name:str=Field(min_length=2,max_length=120);admin_name:str=Field(min_length=2,max_length=100);admin_email:str=Field(pattern=r"^[^@ ]+@[^@ ]+\.[^@ ]+$")
  plan_id:str|None=None;status:str="active";max_users:int=Field(default=6,ge=1,le=500);tool_access:list[str]=Field(default_factory=list)
 class Plan(BaseModel):
  name:str=Field(min_length=2,max_length=80);description:str="";price:float=Field(default=0,ge=0);currency:str="INR"
@@ -202,8 +205,12 @@ def create_company(x:Company,r:Request):
  cid=uuid.uuid4().hex;slug="-".join(x.name.lower().split())[:80]+"-"+cid[:6];pw=temp_password()
  with db() as c:
   if c.execute("SELECT 1 FROM users WHERE email=? COLLATE NOCASE",(x.admin_email,)).fetchone():raise HTTPException(409,"Email already registered.")
-  if x.plan_id and not c.execute("SELECT 1 FROM plans WHERE id=? AND active=1",(x.plan_id,)).fetchone():raise HTTPException(400,"Plan is not active.")
-  c.execute("INSERT INTO companies(id,name,slug,status,plan_id,max_users,tool_access,created_at) VALUES(?,?,?,?,?,?,?,?)",(cid,x.name,slug,x.status,x.plan_id,x.max_users,json.dumps(x.tool_access),now()))
+  planrow=c.execute("SELECT * FROM plans WHERE id=? AND active=1",(x.plan_id,)).fetchone() if x.plan_id else None
+  if x.plan_id and not planrow:raise HTTPException(400,"Plan is not active.")
+  max_users=planrow["max_users"] if planrow else x.max_users
+  tools=x.tool_access or (json.loads(planrow["tool_access"]) if planrow else [])
+  expiry=(datetime.now(timezone.utc)+timedelta(days=planrow["duration_days"])).isoformat() if planrow else None
+  c.execute("INSERT INTO companies(id,name,slug,status,plan_id,max_users,tool_access,plan_started_at,plan_expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(cid,x.name,slug,x.status,x.plan_id,max_users,json.dumps(tools),now() if planrow else None,expiry,now()))
   uid=uuid.uuid4().hex;c.execute("INSERT INTO users(id,company_id,email,full_name,password_hash,role,status,must_change_password,created_at) VALUES(?,?,?,?,?,'company_admin','active',1,?)",(uid,cid,x.admin_email.lower(),x.admin_name,hashpw(pw),now()))
  audit(u,"company_created",cid,{"name":x.name,"admin_email":x.admin_email})
  return {"company_id":cid,"company_name":x.name,"admin_email":x.admin_email,"temporary_password":pw}
