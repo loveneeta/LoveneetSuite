@@ -1496,8 +1496,9 @@ app.include_router(pdf_tools_router)
 
 
 # Multi-tenant authentication, authorization and compulsory output watermarking
-from auth import router as auth_router, init_db as init_auth_db, AuthMiddleware, WatermarkMiddleware
+from auth import router as auth_router, output_router as output_watermark_router, init_db as init_auth_db, AuthMiddleware, WatermarkMiddleware
 app.include_router(auth_router)
+app.include_router(output_watermark_router)
 app.add_middleware(WatermarkMiddleware)
 app.add_middleware(AuthMiddleware)
 
