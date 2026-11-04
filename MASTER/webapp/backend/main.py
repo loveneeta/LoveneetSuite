@@ -1469,3 +1469,8 @@ async def collector_open_folder(payload: dict):
         return {"ok": True, "message": f"Opened {folder}"}
     except Exception as exc:
         raise HTTPException(500, f"Could not open directory: {str(exc)}")
+
+
+# PDF Studio local processing router
+from pdf_tools import router as pdf_tools_router
+app.include_router(pdf_tools_router)
