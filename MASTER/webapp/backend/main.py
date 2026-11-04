@@ -1498,7 +1498,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=".*" if os.getenv("ALLOW_ALL_CORS", "true").lower() == "true" else None,
+    allow_origin_regex=".*" if os.getenv("ALLOW_ALL_CORS", "false").lower() == "true" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
