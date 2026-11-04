@@ -39,7 +39,7 @@ class AuthSecurityTests(unittest.TestCase):
         page.insert_text((72, 72), "Sample document")
         original = source.tobytes()
         cfg = {"enabled": True, "text": "{company} · {user}", "position": "bottom-right", "opacity": 0.4}
-        output = auth.watermark_bytes(original, "sample.pdf", cfg, "Example Company", "Test User")
+        output = auth.wm_bytes(original, "sample.pdf", cfg, "Example Company", "Test User")
         result = fitz.open(stream=output, filetype="pdf")
         extracted = result[0].get_text()
         self.assertIn("Example Company", extracted)
@@ -52,7 +52,7 @@ class AuthSecurityTests(unittest.TestCase):
                          ("company-a", "Company A", "company-a", '["pdf:merge"]', auth.now()))
             conn.execute("INSERT INTO companies(id,name,slug,tool_access,created_at) VALUES(?,?,?,?,?)",
                          ("company-b", "Company B", "company-b", '["convert"]', auth.now()))
-        self.assertEqual(auth.company_tool_access("company-a"), ["pdf:merge"])
+        self.assertEqual(auth.access("company-a"), ["pdf:merge"])
         self.assertEqual(auth.company_tool_access("company-b"), ["convert"])
 
 
