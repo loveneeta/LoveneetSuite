@@ -45,6 +45,7 @@ export default function PdfStudioTool({allowedTools}:{allowedTools?:string[]}){
  const [authLabels,setAuthLabels]=useState<Record<string,string>>({});
  useEffect(()=>{fetch("/api/auth/tools",{credentials:"include"}).then(r=>r.ok?r.json():null).then(d=>{const labels:Record<string,string>={};(d?.tools||[]).forEach((x:any)=>{labels[x.id]=x.name;});setAuthLabels(labels);}).catch(()=>{});},[]);
  const visibleTools=tools.map(t=>({...t,name:authLabels["pdf:"+t.id]||t.name})).filter(t=>!allowedTools||allowedTools.includes("pdf-studio")||allowedTools.includes("pdf:"+t.id));
+ useEffect(()=>{if(visibleTools.length&&!visibleTools.some(t=>t.id===selected))setSelected(visibleTools[0].id);},[visibleTools,selected]);
  const tool=visibleTools.find(t=>t.id===selected)||visibleTools[0];
  const pickAccept=tool.accept || ".pdf,application/pdf";
  const choose=(id:string)=>{setSelected(id);setFiles([]);setNotice(null);setPages("");};
