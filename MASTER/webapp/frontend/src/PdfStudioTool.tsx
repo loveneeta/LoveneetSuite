@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { FileText, Upload, Download, LockKeyhole, Sparkles, ShieldCheck, Files, FileImage, FileSpreadsheet, FileType, RotateCw, Scissors, Eraser, ScanText, WandSparkles, X, CheckCircle2, AlertCircle } from "lucide-react";
 import "./pdf-studio.css";
 
@@ -42,6 +42,9 @@ const groups=["Organize PDF","Optimize PDF","Convert to PDF","Convert from PDF",
 const icons=[FileText,ShieldCheck,FileImage,FileType,ScanText,LockKeyhole,Sparkles];
 export default function PdfStudioTool({allowedTools}:{allowedTools?:string[]}){
  const [selected,setSelected]=useState("merge"),[files,setFiles]=useState<File[]>([]),[pages,setPages]=useState(""),[order,setOrder]=useState("1,2,3"),[angle,setAngle]=useState("90"),[scale,setScale]=useState("1.5"),[text,setText]=useState("CONFIDENTIAL"),[margin,setMargin]=useState("24"),[password,setPassword]=useState(""),[newPassword,setNewPassword]=useState(""),[busy,setBusy]=useState(false),[notice,setNotice]=useState<{type:string;message:string}|null>(null);
+ const [authLabels,setAuthLabels]=useState<Record<string,string>>({});
+ useEffect(()=>{fetch("/api/auth/tools",{credentials:"include"}).then(r=>r.ok?r.json():null).then(d=>{const labels:Record<string,string>={};(d?.tools||[]).forEach((x:any)=>{labels[x.id]=x.name;});setAuthLabels(labels);}).catch(()=>{});},[]);
+ const visibleTools=tools.map(t=>({...t,name:authLabels["pdf:"+t.id]||t.name})).filter(t=>!allowedTools||allowedTools.includes("pdf-studio")||allowedTools.includes("pdf:"+t.id));
  const tool=visibleTools.find(t=>t.id===selected)||visibleTools[0];
  const pickAccept=tool.accept || ".pdf,application/pdf";
  const choose=(id:string)=>{setSelected(id);setFiles([]);setNotice(null);setPages("");};
