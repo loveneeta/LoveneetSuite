@@ -28,6 +28,7 @@ def init_db():
   CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_user_id TEXT,company_id TEXT,action TEXT NOT NULL,detail TEXT DEFAULT '{}',created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT REFERENCES users(id) ON DELETE CASCADE,token_hash TEXT NOT NULL,expires_at REAL NOT NULL,used INTEGER DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS plan_change_requests(id TEXT PRIMARY KEY,company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,requested_plan_id TEXT NOT NULL REFERENCES plans(id),requested_by TEXT NOT NULL REFERENCES users(id),note TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,reviewed_by TEXT,reviewed_at TEXT);
   CREATE INDEX IF NOT EXISTS users_company_idx ON users(company_id);
   """)
   ucols={row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
@@ -117,6 +118,7 @@ class Labels(BaseModel):labels:dict[str,str]
 class Password(BaseModel):current_password:str;new_password:str=Field(min_length=12,max_length=200)
 class Member(BaseModel):full_name:str=Field(min_length=2,max_length=100);email:EmailStr
 class Status(BaseModel):status:str
+class PlanChange(BaseModel):plan_id:str;note:str=Field(default="",max_length=500)
 class Reset(BaseModel):new_password:str|None=Field(default=None,min_length=12,max_length=200)
 @router.get("/status")
 def status():
@@ -206,8 +208,8 @@ def overview(r:Request):
  with db() as c:
   counts={k:c.execute(q).fetchone()["n"] for k,q in {"companies":"SELECT COUNT(*) n FROM companies","active_companies":"SELECT COUNT(*) n FROM companies WHERE status='active'","users":"SELECT COUNT(*) n FROM users","plans":"SELECT COUNT(*) n FROM plans"}.items()}
   cos=c.execute("SELECT c.*,p.name plan_name,(SELECT COUNT(*) FROM users WHERE company_id=c.id) user_count FROM companies c LEFT JOIN plans p ON p.id=c.plan_id ORDER BY c.created_at DESC").fetchall()
-  plans=c.execute("SELECT * FROM plans ORDER BY created_at DESC").fetchall();logs=c.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100").fetchall()
- return {"counts":counts,"companies":[company_obj(x) for x in cos],"plans":[plan_obj(x) for x in plans],"logs":[dict(x) for x in logs],"tools":TOOLS,"labels":json.loads(setting("tool_labels",json.dumps(LABELS))),"watermark":wm_global()}
+  plans=c.execute("SELECT * FROM plans ORDER BY created_at DESC").fetchall();logs=c.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100").fetchall();requests=c.execute("SELECT r.*,c.name company_name,p.name plan_name,u.full_name requester_name FROM plan_change_requests r JOIN companies c ON c.id=r.company_id JOIN plans p ON p.id=r.requested_plan_id JOIN users u ON u.id=r.requested_by ORDER BY r.created_at DESC LIMIT 100").fetchall()
+ return {"counts":counts,"companies":[company_obj(x) for x in cos],"plans":[plan_obj(x) for x in plans],"logs":[dict(x) for x in logs],"plan_requests":[dict(x) for x in requests],"tools":TOOLS,"labels":json.loads(setting("tool_labels",json.dumps(LABELS))),"watermark":wm_global()}
 @router.post("/admin/companies")
 def create_company(x:Company,r:Request):
  u=current(r);roles(u,"super_admin")
@@ -292,7 +294,48 @@ def company_overview(r:Request):
   else:
    members=c.execute("SELECT id,email,full_name,role,status,last_login,created_at FROM users WHERE id=?",(u["id"],)).fetchall()
    logs=[]
- return {"company":company_obj(co),"members":[dict(x) for x in members],"logs":[dict(x) for x in logs]}
+  plans=c.execute("SELECT id,name,description,price,currency,duration_days,max_users FROM plans WHERE active=1 ORDER BY price").fetchall()
+  requests=c.execute("SELECT r.*,p.name plan_name FROM plan_change_requests r JOIN plans p ON p.id=r.requested_plan_id WHERE r.company_id=? ORDER BY r.created_at DESC LIMIT 10",(u["company_id"],)).fetchall()
+ return {"company":company_obj(co),"members":[dict(x) for x in members],"logs":[dict(x) for x in logs],"plans":[dict(x) for x in plans],"plan_requests":[dict(x) for x in requests]}
+@router.get("/company/plans")
+def company_plans(r:Request):
+ u=current(r);roles(u,"company_admin","member")
+ with db() as c:rows=c.execute("SELECT id,name,description,price,currency,duration_days,max_users FROM plans WHERE active=1 ORDER BY price").fetchall()
+ return {"plans":[dict(x) for x in rows]}
+
+@router.post("/company/plan-change")
+def request_plan_change(x:PlanChange,r:Request):
+ u=current(r);roles(u,"company_admin")
+ with db() as c:
+  plan=c.execute("SELECT id FROM plans WHERE id=? AND active=1",(x.plan_id,)).fetchone()
+  if not plan:raise HTTPException(404,"Selected plan is not available.")
+  current_plan=c.execute("SELECT plan_id FROM companies WHERE id=?",(u["company_id"],)).fetchone()
+  if current_plan and current_plan["plan_id"]==x.plan_id:raise HTTPException(400,"Your company is already on this plan.")
+  pending=c.execute("SELECT 1 FROM plan_change_requests WHERE company_id=? AND status='pending'",(u["company_id"],)).fetchone()
+  if pending:raise HTTPException(409,"Your company already has a pending plan request.")
+  rid=uuid.uuid4().hex
+  c.execute("INSERT INTO plan_change_requests(id,company_id,requested_plan_id,requested_by,note,status,created_at) VALUES(?,?,?,?,?,'pending',?)",(rid,u["company_id"],x.plan_id,u["id"],x.note,now()))
+ audit(u,"plan_change_requested",u["company_id"],{"plan_id":x.plan_id,"request_id":rid})
+ return {"ok":True,"request_id":rid,"message":"Plan change request sent to the Super Admin for approval."}
+
+@router.patch("/admin/plan-requests/{rid}")
+def review_plan_request(rid:str,x:Status,r:Request):
+ u=current(r);roles(u,"super_admin")
+ if x.status not in {"approved","rejected"}:raise HTTPException(400,"Choose approved or rejected.")
+ with db() as c:
+  req=c.execute("SELECT * FROM plan_change_requests WHERE id=? AND status='pending'",(rid,)).fetchone()
+  if not req:raise HTTPException(404,"Pending plan request not found.")
+  if x.status=="approved":
+   plan=c.execute("SELECT * FROM plans WHERE id=? AND active=1",(req["requested_plan_id"],)).fetchone()
+   if not plan:raise HTTPException(400,"Requested plan is no longer active.")
+   n=c.execute("SELECT COUNT(*) n FROM users WHERE company_id=?",(req["company_id"],)).fetchone()["n"]
+   if n>plan["max_users"]:raise HTTPException(409,f"Company has {n} accounts; requested plan permits {plan['max_users']}.")
+   expiry=(datetime.now(timezone.utc)+timedelta(days=plan["duration_days"])).isoformat()
+   c.execute("UPDATE companies SET plan_id=?,max_users=?,tool_access=?,plan_started_at=?,plan_expires_at=? WHERE id=?",(plan["id"],plan["max_users"],plan["tool_access"],now(),expiry,req["company_id"]))
+  c.execute("UPDATE plan_change_requests SET status=?,reviewed_by=?,reviewed_at=? WHERE id=?",(x.status,u["id"],now(),rid))
+ audit(u,"plan_change_"+x.status,req["company_id"],{"request_id":rid,"plan_id":req["requested_plan_id"]})
+ return {"ok":True}
+
 @router.patch("/company/profile")
 def profile(x:dict,r:Request):
  u=current(r);roles(u,"company_admin");name=str(x.get("name","")).strip()
