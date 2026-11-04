@@ -46,3 +46,10 @@ Open the Vite URL shown by the terminal. The frontend proxies /api to port 8000.
 
 ## Access control — important
 This repository's current web shell does not yet implement login or backend authorization. Adding a sidebar module integrates the tool into the Suite interface, but **does not by itself prevent direct visitors from opening a public deployment**. Before treating the module as Suite-user-only, put the site behind real authentication (for example, Vercel Deployment Protection or an authenticated reverse proxy) and validate authorization server-side for any protected server APIs. Do not rely on a hidden menu item or client-side flag as a security boundary.
+
+## PDF Studio — local-only processing
+- Added a dedicated PDF Studio workspace with all seven groups from the requested tool list.
+- PDF operations are processed by the Loveneet Suite backend; no iLovePDF or cloud PDF API is used.
+- Local AI Summarizer and Translate are shown as disabled until local models are configured.
+- LibreOffice is optional for Office-to-PDF conversion; other unsupported capabilities are clearly marked.
+- See `PDF_STUDIO_LOCAL.md` for the current feature matrix and limitations.
