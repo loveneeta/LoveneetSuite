@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, io, re, zipfile
+import base64, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, io, re, zipfile, smtplib
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
