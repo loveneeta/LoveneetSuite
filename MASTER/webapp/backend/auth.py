@@ -141,7 +141,7 @@ def login(x:Login,r:Request,res:Response):
    if not co or co["status"]!="active":raise HTTPException(403,"Company account is suspended.")
    if co["plan_expires_at"] and datetime.fromisoformat(co["plan_expires_at"]) < datetime.now(timezone.utc):raise HTTPException(403,"Company subscription has expired. Contact the Super Admin.")
   c.execute("UPDATE users SET last_login=? WHERE id=?",(now(),u["id"]));u=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
- attempts[ip]=[];res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite="lax",max_age=SESSION_SECONDS,path="/")
+ attempts[ip]=[];res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
  return {"user":public(u)}
 @router.post("/logout")
 def logout(res:Response):
