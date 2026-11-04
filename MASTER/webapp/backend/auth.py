@@ -421,7 +421,7 @@ class WatermarkMiddleware:
    if msg.get("more_body",False):return
    headers={k.decode().lower():v.decode() for k,v in (start or {}).get("headers",[])}
    disp=headers.get("content-disposition","")
-   if disp and (start or {}).get("status",200)<400:
+   if disp and headers.get("x-watermark-applied")!="1" and (start or {}).get("status",200)<400:
     m=re.search(r'filename="?([^";]+)',disp,re.I);filename=m.group(1) if m else "output.bin"
     try:data=watermark_download(b"".join(parts),filename,u)
     except Exception:
