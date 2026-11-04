@@ -85,6 +85,13 @@ async def pdf_tool(tool: str, files: Annotated[list[UploadFile], File()], option
             remaining=page.insert_textbox(rect,text[:12000],fontsize=10,fontname="helv",lineheight=1.35)
             if remaining<0: raise ValueError("HTML content is too long for this basic local text renderer. Print complex layouts to PDF from your browser.")
             return response(doc.tobytes(),"html.pdf")
+        if tool=="merge":
+            out=fitz.open()
+            for filename,payload in raw:
+                source=fitz.open(stream=payload,filetype="pdf")
+                if source.needs_pass: raise HTTPException(400,f"Password-protected file needs to be unlocked first: {filename}")
+                out.insert_pdf(source)
+            return response(out.tobytes(garbage=4,deflate=True),"merged.pdf")
         if tool=="compare":
             a=fitz.open(stream=raw[0][1],filetype="pdf"); b=fitz.open(stream=raw[1][1],filetype="pdf")
             lines=["PDF COMPARISON",f"File A: {raw[0][0]} ({a.page_count} pages)",f"File B: {raw[1][0]} ({b.page_count} pages)",""]
