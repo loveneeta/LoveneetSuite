@@ -1,0 +1,45 @@
+name: Multi-tenant Auth & Watermark Checks
+
+on:
+  pull_request:
+    paths:
+      - "MASTER/webapp/frontend/**"
+      - "MASTER/webapp/backend/**"
+      - "MASTER/webapp/AUTHENTICATION_SETUP.md"
+      - ".github/workflows/multi-tenant-auth-check.yml"
+  push:
+    branches:
+      - "feature/multi-tenant-auth-admin"
+    paths:
+      - "MASTER/webapp/frontend/**"
+      - "MASTER/webapp/backend/**"
+      - ".github/workflows/multi-tenant-auth-check.yml"
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: MASTER/webapp/frontend/package-lock.json
+      - run: npm ci
+        working-directory: MASTER/webapp/frontend
+      - run: npm run build
+        working-directory: MASTER/webapp/frontend
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+        working-directory: MASTER/webapp/backend
+      - run: python -m py_compile main.py auth.py pdf_tools.py
+        working-directory: MASTER/webapp/backend
+      - run: python -m unittest discover -s tests -p "test_*.py"
+        working-directory: MASTER/webapp/backend

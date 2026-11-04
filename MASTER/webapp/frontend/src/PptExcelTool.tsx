@@ -1,3 +1,4 @@
+import { secureDownload } from "./services/secureDownload";
 import React, { useState } from "react";
 import {
   FileImage,
@@ -1217,15 +1218,8 @@ export default function PptExcelTool() {
       const blob = new Blob([buf], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "PPT_to_Excel_with_Images.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setStatus("✓ Workbook created locally and downloaded.");
+      await secureDownload(blob,"PPT_to_Excel_with_Images.xlsx");
+      setStatus("✓ Workbook created locally, watermarked and downloaded.");
     } catch (e: any) {
       setError(e.message || "Export failed");
     } finally {

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { secureDownload } from "./services/secureDownload";
 import {
   Building2,
   Database,
@@ -124,14 +125,7 @@ export default function BusinessSystemTool({ onNavigate }: { onNavigate?: (pageI
       const res = await fetch(`${ERP_LOCAL_URL}/api/v1/companies/${companyId}/products/export/suite`);
       if (!res.ok) throw new Error("Could not export product data");
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${companyCode}_PRODUCTS_CATALOG_EXPORT.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      await secureDownload(blob, `${companyCode}_PRODUCTS_CATALOG_EXPORT.csv`);
       setExportNotice(`Exported ${companyCode} products successfully! Ready for Excel to Catalogue PPT.`);
     } catch (err: any) {
       setExportNotice(`Notice: Open ERP at ${ERP_LOCAL_URL} to download product CSV.`);

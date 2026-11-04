@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { FileText, Upload, Download, LockKeyhole, Sparkles, ShieldCheck, Files, FileImage, FileSpreadsheet, FileType, RotateCw, Scissors, Eraser, ScanText, WandSparkles, X, CheckCircle2, AlertCircle } from "lucide-react";
 import "./pdf-studio.css";
 
@@ -40,9 +40,13 @@ const tools:Tool[]=[
 ];
 const groups=["Organize PDF","Optimize PDF","Convert to PDF","Convert from PDF","Edit PDF","PDF Security","PDF Intelligence"];
 const icons=[FileText,ShieldCheck,FileImage,FileType,ScanText,LockKeyhole,Sparkles];
-export default function PdfStudioTool(){
+export default function PdfStudioTool({allowedTools}:{allowedTools?:string[]}){
  const [selected,setSelected]=useState("merge"),[files,setFiles]=useState<File[]>([]),[pages,setPages]=useState(""),[order,setOrder]=useState("1,2,3"),[angle,setAngle]=useState("90"),[scale,setScale]=useState("1.5"),[text,setText]=useState("CONFIDENTIAL"),[margin,setMargin]=useState("24"),[password,setPassword]=useState(""),[newPassword,setNewPassword]=useState(""),[busy,setBusy]=useState(false),[notice,setNotice]=useState<{type:string;message:string}|null>(null);
- const tool=tools.find(t=>t.id===selected)!;
+ const [authLabels,setAuthLabels]=useState<Record<string,string>>({});
+ useEffect(()=>{fetch("/api/auth/tools",{credentials:"include"}).then(r=>r.ok?r.json():null).then(d=>{const labels:Record<string,string>={};(d?.tools||[]).forEach((x:any)=>{labels[x.id]=x.name;});setAuthLabels(labels);}).catch(()=>{});},[]);
+ const visibleTools=tools.map(t=>({...t,name:authLabels["pdf:"+t.id]||t.name})).filter(t=>!allowedTools||allowedTools.includes("pdf-studio")||allowedTools.includes("pdf:"+t.id));
+ useEffect(()=>{if(visibleTools.length&&!visibleTools.some(t=>t.id===selected))setSelected(visibleTools[0].id);},[visibleTools,selected]);
+ const tool=visibleTools.find(t=>t.id===selected)||visibleTools[0];
  const pickAccept=tool.accept || ".pdf,application/pdf";
  const choose=(id:string)=>{setSelected(id);setFiles([]);setNotice(null);setPages("");};
  const run=async()=>{if(tool.disabled){setNotice({type:"error",message:"This feature is not enabled in the local-only edition."});return;}if(!files.length){setNotice({type:"error",message:"Select the required file(s) first."});return;}
@@ -56,7 +60,7 @@ export default function PdfStudioTool(){
  return <div className="pdfstudio">
   <div className="pdfstudio-intro"><div><span className="pdfstudio-kicker"><ShieldCheck size={14}/> LOCAL DOCUMENT WORKSPACE</span><h2>PDF Studio</h2><p>PDF processing runs on your Loveneet Suite server. Files are not sent to online PDF services.</p></div><div className="pdfstudio-local"><LockKeyhole size={18}/><span><b>Local-only processing</b><small>No cloud PDF APIs</small></span></div></div>
   {notice&&<div className={"pdfstudio-notice "+notice.type}><span>{notice.type==="success"?<CheckCircle2 size={18}/>:<AlertCircle size={18}/>}</span>{notice.message}<button onClick={()=>setNotice(null)}><X size={16}/></button></div>}
-  <div className="pdfstudio-groups">{groups.map((group,i)=>{const Icon=icons[i];return <section className="pdfstudio-group" key={group}><header><span className={"pdfstudio-group-icon tone-"+i}><Icon size={18}/></span><div><h3>{group}</h3><small>{tools.filter(t=>t.category===group).length} tools</small></div></header><div className="pdfstudio-toolgrid">{tools.filter(t=>t.category===group).map(t=><button key={t.id} className={"pdfstudio-tool "+(selected===t.id?"selected":"")+(t.disabled?" disabled":"")} onClick={()=>choose(t.id)}><b>{t.name}</b><span>{t.description}</span>{t.disabled&&<small>Not configured</small>}</button>)}</div></section>})}</div>
+  <div className="pdfstudio-groups">{groups.map((group,i)=>{const Icon=icons[i];return <section className="pdfstudio-group" key={group}><header><span className={"pdfstudio-group-icon tone-"+i}><Icon size={18}/></span><div><h3>{group}</h3><small>{visibleTools.filter(t=>t.category===group).length} tools</small></div></header><div className="pdfstudio-toolgrid">{visibleTools.filter(t=>t.category===group).map(t=><button key={t.id} className={"pdfstudio-tool "+(selected===t.id?"selected":"")+(t.disabled?" disabled":"")} onClick={()=>choose(t.id)}><b>{t.name}</b><span>{t.description}</span>{t.disabled&&<small>Not configured</small>}</button>)}</div></section>})}</div>
   <section className="pdfstudio-workspace"><div className="pdfstudio-work-head"><div><span className="pdfstudio-kicker">SELECTED WORKFLOW</span><h3>{tool.name}</h3><p>{tool.description}</p></div><span className="pdfstudio-count">{files.length} file(s)</span></div>
    {tool.disabled&&<div className="pdfstudio-hint">This operation is intentionally unavailable in the local-only release. No document will be uploaded to a third-party service.</div>}
    <label className="pdfstudio-drop"><input type="file" accept={pickAccept} multiple={!!tool.multiple} onChange={e=>setFiles(Array.from(e.target.files||[]))}/><Upload size={24}/><b>Choose {tool.multiple?"file(s)":"a file"}</b><span>{files.length?files.map(f=>f.name).join(" · "):"Select files from this device"}</span><small>{tool.multiple?"Multiple files supported": "One file per operation"} · Max 100 MB per file</small></label>
