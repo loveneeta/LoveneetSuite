@@ -1,3 +1,6 @@
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
 import io, json, os, re, shutil, subprocess, tempfile, zipfile
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +24,8 @@ allowed_origins = [
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]

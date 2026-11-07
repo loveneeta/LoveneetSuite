@@ -1,4 +1,11 @@
 from __future__ import annotations
+from pathlib import Path
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except Exception:
+    pass
+
 import base64, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, io, re, zipfile, smtplib
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
@@ -11,8 +18,9 @@ from pydantic import BaseModel, Field
 
 router=APIRouter(prefix="/api/auth",tags=["authentication"])
 output_router=APIRouter(tags=["output watermarking"])
-COOKIE="loveneet_session"; SESSION_SECONDS=43200
-TOOLS=["dashboard","pdf-studio","business-system","collector","convert","organize","ppt","pdf-excel","excel-ppt","ppt-excel"]+["pdf:"+x for x in ["merge","split","remove-pages","extract-pages","organize-pages","scan-to-pdf","compress","repair","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","html-to-pdf","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","rotate","watermark","page-numbers","crop","edit-pdf","redact","forms","sign","unlock","protect","compare","pdf-to-pdfa","ai-summarizer","translate"]]
+COOKIE="loveneet_session"; CSRF_COOKIE="loveneet_csrf"; SESSION_SECONDS=43200
+def csrf_token(u): return hmac.new(secret(), b"csrf:" + u["id"].encode(), hashlib.sha256).hexdigest()[:32]
+TOOLS=["dashboard","pdf-studio","collector","convert","organize","ppt","pdf-excel","excel-ppt","ppt-excel"]+["pdf:"+x for x in ["merge","split","remove-pages","extract-pages","organize-pages","scan-to-pdf","compress","repair","ocr","image-to-pdf","word-to-pdf","pptx-to-pdf","excel-to-pdf","html-to-pdf","pdf-to-jpg","pdf-to-word","pdf-to-pptx","pdf-to-excel","pdf-to-markdown","rotate","watermark","page-numbers","crop","edit-pdf","redact","forms","sign","unlock","protect","compare","pdf-to-pdfa","ai-summarizer","translate"]]
 LABELS={x:x.replace("pdf:","").replace("-"," ").title() for x in TOOLS}
 def now(): return datetime.now(timezone.utc).isoformat()
 def path():
@@ -134,7 +142,11 @@ def setup(x:Setup,r:Request,res:Response):
   if c.execute("SELECT 1 FROM users WHERE role='super_admin'").fetchone():raise HTTPException(409,"Super Admin already exists.")
   uid=uuid.uuid4().hex;c.execute("INSERT INTO users(id,email,full_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",(uid,x.email.lower(),x.full_name,hashpw(x.password),"super_admin",now()));u=c.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
  res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
- audit(u,"super_admin_created");return {"user":public(u)}
+ res.set_cookie(CSRF_COOKIE,csrf_token(u),httponly=False,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
+ audit(u,"super_admin_created");return {"user":public(u),"csrf_token":csrf_token(u)}
+@router.get("/login")
+def login_info():
+ return {"detail":"Authentication endpoint. Submit email and password via POST."}
 @router.post("/login")
 def login(x:Login,r:Request,res:Response):
  init_db();ip=r.client.host if r.client else "unknown";nowsec=int(time.time());attempts=getattr(login,"attempts",{});recent=[v for v in attempts.get(ip,[]) if nowsec-v<300]
@@ -149,15 +161,19 @@ def login(x:Login,r:Request,res:Response):
    if co["plan_expires_at"] and datetime.fromisoformat(co["plan_expires_at"]) < datetime.now(timezone.utc):raise HTTPException(403,"Company subscription has expired. Contact the Super Admin.")
   c.execute("UPDATE users SET last_login=? WHERE id=?",(now(),u["id"]));u=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
  attempts[ip]=[];res.set_cookie(COOKIE,token(u),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
- return {"user":public(u)}
+ res.set_cookie(CSRF_COOKIE,csrf_token(u),httponly=False,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
+ return {"user":public(u),"csrf_token":csrf_token(u)}
 @router.post("/logout")
 def logout(r:Request,res:Response):
  u=getattr(r.state,"auth_user",None)
  if u:
   with db() as c:c.execute("UPDATE users SET session_version=session_version+1 WHERE id=?",(u["id"],))
- res.delete_cookie(COOKIE,path="/",httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());return {"ok":True}
+ res.delete_cookie(COOKIE,path="/",httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());res.delete_cookie(CSRF_COOKIE,path="/",httponly=False,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower());return {"ok":True}
 @router.get("/me")
-def me(r:Request):return {"user":public(current(r))}
+def me(r:Request,res:Response):
+ u=current(r);tok=csrf_token(u)
+ res.set_cookie(CSRF_COOKIE,tok,httponly=False,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
+ return {"user":public(u),"csrf_token":tok}
 @router.post("/change-password")
 def change(x:Password,r:Request,res:Response):
  u=current(r)
@@ -167,7 +183,8 @@ def change(x:Password,r:Request,res:Response):
   setpw(c,u["id"],x.new_password,False)
   updated=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
  res.set_cookie(COOKIE,token(updated),httponly=True,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
- audit(u,"password_changed",u["company_id"]);return {"ok":True}
+ res.set_cookie(CSRF_COOKIE,csrf_token(updated),httponly=False,secure=os.getenv("AUTH_COOKIE_SECURE","false").lower()=="true",samesite=os.getenv("AUTH_COOKIE_SAMESITE","lax").lower(),max_age=SESSION_SECONDS,path="/")
+ audit(u,"password_changed",u["company_id"]);return {"ok":True,"csrf_token":csrf_token(updated)}
 @router.post("/forgot-password")
 def forgot(x:dict):
  email=str(x.get("email","")).strip().lower()
@@ -198,7 +215,7 @@ def reset(x:dict):
  return {"ok":True}
 @router.get("/tools")
 def tools(r:Request):
- u=current(r);labels=json.loads(setting("tool_labels",json.dumps(LABELS)));allowed=TOOLS if u["role"]=="super_admin" else [t for t in access(u["company_id"]) if t not in {"business-system","collector"}]
+ u=current(r);labels=json.loads(setting("tool_labels",json.dumps(LABELS)));allowed=TOOLS if u["role"]=="super_admin" else [t for t in access(u["company_id"]) if t not in {"collector"}]
  has_pdf=any(t.startswith("pdf:") for t in allowed)
  return {"tools":[{"id":t,"name":labels.get(t,LABELS[t]),"allowed":u["role"]=="super_admin" or t in allowed or (t=="pdf-studio" and has_pdf) or (t.startswith("pdf:") and "pdf-studio" in allowed)} for t in TOOLS]}
 def company_obj(x):
@@ -217,7 +234,7 @@ def overview(r:Request):
 @router.post("/admin/companies")
 def create_company(x:Company,r:Request):
  u=current(r);roles(u,"super_admin")
- if x.status not in {"active","suspended"} or any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Invalid company status or tool access.")
+ if x.status not in {"active","suspended"} or any(t not in TOOLS or t in {"collector"} for t in x.tool_access):raise HTTPException(400,"Invalid company status or tool access.")
  cid=uuid.uuid4().hex;slug="-".join(x.name.lower().split())[:80]+"-"+cid[:6];pw=temp_password()
  with db() as c:
   if c.execute("SELECT 1 FROM users WHERE email=? COLLATE NOCASE",(x.admin_email,)).fetchone():raise HTTPException(409,"Email already registered.")
@@ -235,7 +252,7 @@ def update_company(cid:str,x:dict,r:Request):
  u=current(r);roles(u,"super_admin");allowed={"name","status","plan_id","max_users","tool_access","plan_started_at","plan_expires_at"};v={k:z for k,z in x.items() if k in allowed}
  if not v:raise HTTPException(400,"No valid changes supplied.")
  if "status" in v and v["status"] not in {"active","suspended"}:raise HTTPException(400,"Invalid status.")
- if "tool_access" in v and any(t not in TOOLS or t in {"business-system","collector"} for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
+ if "tool_access" in v and any(t not in TOOLS or t in {"collector"} for t in v["tool_access"]):raise HTTPException(400,"Unknown tool.")
  if "max_users" in v and not 1<=int(v["max_users"])<=500:raise HTTPException(400,"Invalid user limit.")
  if "plan_id" in v and v["plan_id"]:
   with db() as c:
@@ -253,7 +270,7 @@ def update_company(cid:str,x:dict,r:Request):
 @router.post("/admin/plans")
 def create_plan(x:Plan,r:Request):
  u=current(r);roles(u,"super_admin")
- if any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool in plan.")
+ if any(t not in TOOLS or t in {"collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool in plan.")
  pid=uuid.uuid4().hex
  with db() as c:
   try:c.execute("INSERT INTO plans(id,name,description,price,currency,duration_days,max_users,tool_access,active,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,x.name,x.description,x.price,x.currency,x.duration_days,x.max_users,json.dumps(x.tool_access),int(x.active),now()))
@@ -262,7 +279,7 @@ def create_plan(x:Plan,r:Request):
 @router.patch("/admin/plans/{pid}")
 def update_plan(pid:str,x:Plan,r:Request):
  u=current(r);roles(u,"super_admin")
- if any(t not in TOOLS or t in {"business-system","collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool.")
+ if any(t not in TOOLS or t in {"collector"} for t in x.tool_access):raise HTTPException(400,"Unknown or tenant-restricted tool.")
  with db() as c:
   cur=c.execute("UPDATE plans SET name=?,description=?,price=?,currency=?,duration_days=?,max_users=?,tool_access=?,active=? WHERE id=?",(x.name,x.description,x.price,x.currency,x.duration_days,x.max_users,json.dumps(x.tool_access),int(x.active),pid))
   if not cur.rowcount:raise HTTPException(404,"Plan not found.")
@@ -454,25 +471,7 @@ class AuthMiddleware:
   public=path in {"/api/health","/api/auth/status","/api/auth/setup","/api/auth/login","/api/auth/forgot-password","/api/auth/reset-password"}
   if scope["type"]!="http" or not path.startswith("/api/") or public:return await self.app(scope,receive,send)
   headers={k.decode().lower():v.decode() for k,v in scope.get("headers",[])};t=None
-  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","false").lower()!="true":
-   origin=headers.get("origin")
-   if origin:
-    proto=headers.get("x-forwarded-proto",scope.get("scheme","http")).split(",")[0].strip()
-    host=headers.get("host","")
-    trusted={x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
-    trusted.update({"http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174","http://localhost:3000","http://127.0.0.1:3000"})
-    if host:trusted.add(proto+"://"+host)
-    if origin.rstrip("/") not in trusted:
-     body=b'{"detail":"Request origin is not trusted."}'
-     await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
-     await send({"type":"http.response.body","body":body})
-     return
-   elif headers.get("sec-fetch-site")=="cross-site":
-    body=b'{"detail":"Cross-site request rejected."}'
-    await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
-    await send({"type":"http.response.body","body":body})
-    return
-  for p in headers.get("cookie","").split(";"):
+  for p in headers.get("cookie","").split(";"): 
    k,sep,v=p.strip().partition("=")
    if sep and k==COOKIE:t=v
   u=user_token(t)
@@ -480,6 +479,27 @@ class AuthMiddleware:
    body=b'{"detail":"Authentication required. Please sign in."}'
    await send({"type":"http.response.start","status":401,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]});await send({"type":"http.response.body","body":body});return
   scope.setdefault("state",{})["auth_user"]=u
+  if scope.get("method") in {"POST","PUT","PATCH","DELETE"} and os.getenv("ALLOW_ALL_CORS","false").lower()!="true":
+   client_csrf=headers.get("x-csrf-token","")
+   valid_csrf=bool(client_csrf and hmac.compare_digest(client_csrf,csrf_token(u)))
+   if not valid_csrf:
+    origin=headers.get("origin")
+    if origin:
+     proto=headers.get("x-forwarded-proto",scope.get("scheme","http")).split(",")[0].strip()
+     host=headers.get("host","")
+     trusted={x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()}
+     trusted.update({"http://localhost:5173","http://127.0.0.1:5173","http://localhost:5174","http://127.0.0.1:5174","http://localhost:4173","http://127.0.0.1:4173","http://localhost:3000","http://127.0.0.1:3000"})
+     if host:trusted.add(proto+"://"+host)
+     if origin.rstrip("/") not in trusted:
+      body=b'{"detail":"Request origin is not trusted."}'
+      await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
+      await send({"type":"http.response.body","body":body})
+      return
+    elif headers.get("sec-fetch-site")=="cross-site":
+     body=b'{"detail":"Cross-site request rejected."}'
+     await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})
+     await send({"type":"http.response.body","body":body})
+     return
   if u["must_change_password"] and path not in {"/api/auth/me","/api/auth/change-password","/api/auth/logout"}:
    body=b'{"detail":"A password change is required before accessing the workspace."}'
    await send({"type":"http.response.start","status":403,"headers":[(b"content-type",b"application/json"),(b"content-length",str(len(body)).encode())]})

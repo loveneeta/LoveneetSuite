@@ -50,5 +50,9 @@ Desktop.ini
 .env.*
 !.env.example
 *.tmp
+*.db
+*.db-wal
+*.db-shm
+**/backend/data/
 
 audit/*.pptx
